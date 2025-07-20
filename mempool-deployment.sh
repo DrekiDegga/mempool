@@ -79,17 +79,33 @@ echo "Setting up tools directory..."
 mkdir -p /opt/mempool-tools/rustup /opt/mempool-tools/cargo /opt/mempool-tools/.npm-cache
 chown -R mempool:mempool /opt/mempool-tools
 
-# Install Rust for mempool user with explicit environment variables
-echo "Installing Rust..."
-sudo -u mempool env HOME=/opt/mempool-home RUSTUP_HOME=/opt/mempool-tools/rustup CARGO_HOME=/opt/mempool-tools/cargo \
-  bash -c 'curl --proto "=https" --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --no-modify-path --default-toolchain 1.84'
 
-# Verify Rust installation
-if ! sudo -u mempool env HOME=/opt/mempool-home PATH=/opt/mempool-tools/cargo/bin:$PATH cargo --version; then
+# Install Rust with default toolchain and log output
+echo "Installing Rust with default toolchain 1.84..."
+install_log=$(mktemp)
+sudo -u mempool env HOME=/opt/mempool-home RUSTUP_HOME=/opt/mempool-tools/rustup CARGO_HOME=/opt/mempool-tools/cargo \
+  bash -c 'curl --proto "=https" --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --no-modify-path --default-toolchain 1.84' > "$install_log" 2>&1
+if [ $? -ne 0 ]; then
+  echo "Error: Rust installation failed. Check log: $install_log"
+  cat "$install_log"
+  exit 1
+fi
+rm "$install_log"
+
+# Explicitly set the default toolchain
+echo "Setting default toolchain to 1.84..."
+sudo -u mempool env HOME=/opt/mempool-home RUSTUP_HOME=/opt/mempool-tools/rustup CARGO_HOME=/opt/mempool-tools/cargo \
+  bash -c '/opt/mempool-tools/cargo/bin/rustup default 1.84'
+
+# Verify the installation
+echo "Verifying Rust installation..."
+sudo -u mempool env HOME=/opt/mempool-home PATH=/opt/mempool-tools/cargo/bin:$PATH cargo --version
+if [ $? -ne 0 ]; then
   echo "Error: Rust installation failed."
   exit 1
 fi
 
+echo "Rust installation successful!"
 # Clone Mempool.space repository
 echo "Cloning Mempool.space repository..."
 # Clean up existing /opt/mempool if it exists
