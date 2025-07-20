@@ -66,10 +66,12 @@ echo "Installing Node.js LTS from NodeSource..."
 curl -fsSL https://deb.nodesource.com/setup_lts.x | bash -
 apt-get install -y nodejs
 
-# Create a system user for Mempool
+# Create a system user for Mempool with a home directory
 if ! id -u mempool > /dev/null 2>&1; then
-  echo "Creating mempool user..."
-  adduser --system --group --no-create-home mempool
+  echo "Creating mempool user with home directory..."
+  mkdir -p /opt/mempool-home
+  adduser --system --group --home /opt/mempool-home --no-create-home mempool
+  chown -R mempool:mempool /opt/mempool-home
 fi
 
 # Set up tools directory for Rust and npm cache
@@ -77,19 +79,23 @@ echo "Setting up tools directory..."
 mkdir -p /opt/mempool-tools/rustup /opt/mempool-tools/cargo /opt/mempool-tools/.npm-cache
 chown -R mempool:mempool /opt/mempool-tools
 
-# Install Rust for mempool user with custom HOME
+# Install Rust for mempool user with explicit environment variables
 echo "Installing Rust..."
-sudo -u mempool bash -c 'HOME=/opt/mempool-tools RUSTUP_HOME=/opt/mempool-tools/rustup CARGO_HOME=/opt/mempool-tools/cargo curl --proto "=https" --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --no-modify-path'
+sudo -u mempool env HOME=/opt/mempool-home RUSTUP_HOME=/opt/mempool-tools/rustup CARGO_HOME=/opt/mempool-tools/cargo \
+  bash -c 'curl --proto "=https" --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --no-modify-path'
 
-# Set Rust version to 1.84 (optional, adjust as needed)
-sudo -u mempool bash -c 'export HOME=/opt/mempool-tools RUSTUP_HOME=/opt/mempool-tools/rustup CARGO_HOME=/opt/mempool-tools/cargo; /opt/mempool-tools/cargo/bin/rustup install 1.84'
-sudo -u mempool bash -c 'export HOME=/opt/mempool-tools RUSTUP_HOME=/opt/mempool-tools/rustup CARGO_HOME=/opt/mempool-tools/cargo; /opt/mempool-tools/cargo/bin/rustup default 1.84'
+# Set Rust version to 1.84
+sudo -u mempool env HOME=/opt/mempool-home RUSTUP_HOME=/opt/mempool-tools/rustup CARGO_HOME=/opt/mempool-tools/cargo \
+  bash -c '/opt/mempool-tools/cargo/bin/rustup install 1.84'
+sudo -u mempool env HOME=/opt/mempool-home RUSTUP_HOME=/opt/mempool-tools/rustup CARGO_HOME=/opt/mempool-tools/cargo \
+  bash -c '/opt/mempool-tools/cargo/bin/rustup default 1.84'
 
 # Verify Rust installation
-if ! sudo -u mempool bash -c 'export HOME=/opt/mempool-tools PATH=/opt/mempool-tools/cargo/bin:$PATH; cargo --version'; then
-    echo "Error: Rust installation failed."
-    exit 1
+if ! sudo -u mempool env HOME=/opt/mempool-home PATH=/opt/mempool-tools/cargo/bin:$PATH cargo --version; then
+  echo "Error: Rust installation failed."
+  exit 1
 fi
+
 # Clone Mempool.space repository
 echo "Cloning Mempool.space repository..."
 # Clean up existing /opt/mempool if it exists
