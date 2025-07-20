@@ -72,6 +72,11 @@ if ! id -u mempool > /dev/null 2>&1; then
   adduser --system --group --no-create-home mempool
 fi
 
+# Set up npm cache directory for mempool user
+echo "Setting up npm cache directory..."
+mkdir -p /opt/mempool/.npm-cache
+chown mempool:mempool /opt/mempool/.npm-cache
+
 # Clone Mempool.space repository
 echo "Cloning Mempool.space repository..."
 mkdir -p /opt
@@ -143,34 +148,64 @@ cat << EOF > mempool-config.json
 }
 EOF
 
-# Install backend dependencies and build
+# Clean up any existing node_modules to avoid corruption
+echo "Cleaning up existing node_modules..."
+rm -rf /opt/mempool/backend/node_modules /opt/mempool/backend/package-lock.json
+
+# Install backend dependencies
 echo "Installing backend dependencies..."
-sudo -u mempool npm install
-# Fix: Build the backend to generate dist/index.js
+sudo -u mempool npm install --cache=/opt/mempool/.npm-cache
+if [ $? -ne 0 ]; then
+  echo "Error: npm install failed for backend. Check the output above for details."
+  echo "Try running manually:"
+  echo "  cd /opt/mempool/backend"
+  echo "  sudo -u mempool npm install --cache=/opt/mempool/.npm-cache --loglevel=verbose"
+  exit 1
+fi
+
+# Ensure typescript is installed
+echo "Ensuring typescript is installed..."
+sudo -u mempool npm install typescript --cache=/opt/mempool/.npm-cache
+if [ ! -f /opt/mempool/backend/node_modules/typescript/bin/tsc ]; then
+  echo "Error: TypeScript not installed correctly."
+  echo "Try running manually:"
+  echo "  cd /opt/mempool/backend"
+  echo "  sudo -u mempool npm install typescript --cache=/opt/mempool/.npm-cache"
+  exit 1
+fi
+
+# Build backend
 echo "Building backend..."
-sudo -u mempool npm run build
-# Check if build was successful
+sudo -u mempool npm run build --cache=/opt/mempool/.npm-cache
 if [ ! -f /opt/mempool/backend/dist/index.js ]; then
   echo "Error: Backend build failed. The file /opt/mempool/backend/dist/index.js was not created."
   echo "Please check the output of 'npm run build' for errors."
-  echo "You can try running the following commands manually:"
+  echo "Try running manually:"
   echo "  cd /opt/mempool/backend"
-  echo "  sudo -u mempool npm run build"
+  echo "  sudo -u mempool npm run build --cache=/opt/mempool/.npm-cache --loglevel=verbose"
   exit 1
 fi
 
 # Build frontend
 echo "Building frontend..."
 cd ../frontend
-sudo -u mempool npm install
+rm -rf node_modules package-lock.json
+sudo -u mempool npm install --cache=/opt/mempool/.npm-cache
+if [ $? -ne 0 ]; then
+  echo "Error: npm install failed for frontend. Check the output above for details."
+  echo "Try running manually:"
+  echo "  cd /opt/mempool/frontend"
+  echo "  sudo -u mempool npm install --cache=/opt/mempool/.npm-cache --loglevel=verbose"
+  exit 1
+fi
 sudo -u mempool cp mempool-frontend-config.sample.json mempool-frontend-config.json
-sudo -u mempool npm run build
+sudo -u mempool npm run build --cache=/opt/mempool/.npm-cache
 if [ ! -d dist/mempool ]; then
   echo "Error: Frontend build failed. The directory /opt/mempool/frontend/dist/mempool was not created."
   echo "Please check the output of 'npm run build' for errors."
-  echo "You can try running the following commands manually:"
+  echo "Try running manually:"
   echo "  cd /opt/mempool/frontend"
-  echo "  sudo -u mempool npm run build"
+  echo "  sudo -u mempool npm run build --cache=/opt/mempool/.npm-cache --loglevel=verbose"
   exit 1
 fi
 mkdir -p /var/www/html/mempool
@@ -181,3 +216,191 @@ chown -R www-data:www-data /var/www/html/mempool
 echo "Configuring Apache on this VM..."
 a2enmod proxy proxy_http
 cat << EOF > /etc/apache2/sites-available/mempool.conf
+<VirtualHost *:80>
+    ServerName mempool.local
+    DocumentRoot /var/www/html/mempool
+
+    <Directory /var/www/html/mempool>
+        Options Indexes FollowSymLinks
+        AllowOverride All
+        Require all granted
+    </Directory>
+
+    ProxyPass /api http://localhost:8999/api
+    ProxyPassReverse /api http://localhost:8999/api
+</VirtualHost>
+EOF
+a2ensite mempool
+systemctl reload apache2
+
+# Create systemd service for Mempool backend
+echo "Creating systemd service for Mempool backend..."
+cat << EOF > /etc/systemd/system/mempool.service
+[Unit]
+Description=Mempool.space Backend
+After=network.target
+
+[Service]
+WorkingDirectory=/opt/mempool/backend
+ExecStart=/usr/bin/node --max-old-space-size=2048 dist/index.js
+User=mempool
+Restart=on-failure
+RestartSec=600
+
+[Install]
+WantedBy=multi-user.target
+EOF
+systemctl daemon-reload
+systemctl enable mempool
+systemctl start mempool
+
+# Set up TOR hidden service if enabled
+if [ "$tor_enabled" == "yes" ]; then
+  echo "Configuring TOR hidden service..."
+  echo "HiddenServiceDir /var/lib/tor/mempool/" >> /etc/tor/torrc
+  echo "HiddenServicePort 80 127.0.0.1:80" >> /etc/tor/torrc
+  systemctl restart tor
+  sleep 5
+  onion_address=$(cat /var/lib/tor/mempool/hostname)
+fi
+
+# Get the internal IP for summary
+internal_ip=$(hostname -I | awk '{print $1}')
+
+# Summary
+echo ""
+echo "Mempool.space Deployment Summary"
+echo "================================="
+echo "Installation Path: /opt/mempool"
+echo "Frontend Access (Internal): http://$internal_ip/mempool"
+if [ "$tor_enabled" == "yes" ]; then
+  echo "TOR Hidden Service: http://$onion_address"
+fi
+echo "Backend Service: mempool.service"
+echo "Database: $db_host:$db_port, Database Name: $db_name, User: $db_user"
+if [ "$db_host" == "localhost" ]; then
+  echo "Database Password: $db_pass (generated)"
+else
+  echo "Database Password: (as provided)"
+fi
+echo "Bitcoin RPC: $bitcoin_rpc_host:$bitcoin_rpc_port, User: $bitcoin_rpc_user"
+echo "Electrum Server: $electrum_host:$electrum_port, TLS: $electrum_tls"
+echo ""
+echo "Services Installed:"
+echo "- mempool.service (Mempool backend)"
+echo "- apache2 (Serving frontend and proxying API on this VM)"
+if [ "$tor_enabled" == "yes" ]; then
+  echo "- tor (TOR hidden service)"
+fi
+if [ "$db_host" == "localhost" ]; then
+  echo "- mariadb (Local database)"
+fi
+echo ""
+echo "Public Access Configuration"
+echo "---------------------------"
+echo "To serve Mempool.space publicly via your existing Apache2 server, add this to its configuration:"
+echo ""
+echo "<VirtualHost *:443>"
+echo "    ServerName mempool.example.com"
+echo "    SSLEngine on"
+echo "    SSLCertificateFile /path/to/cert.pem"
+echo "    SSLCertificateKeyFile /path/to/key.pem"
+echo ""
+echo "    ProxyPass / http://$internal_ip:80/"
+echo "    ProxyPassReverse / http://$internal_ip:80/"
+echo "</VirtualHost>"
+echo "Adjust ServerName and SSL certificate paths as needed."
+echo ""
+echo "Recommendations"
+echo "--------------"
+echo "To update Mempool.space:"
+echo "  cd /opt/mempool"
+echo "  git pull"
+echo "  cd backend"
+echo "  rm -rf node_modules package-lock.json"
+echo "  sudo -u mempool npm install --cache=/opt/mempool/.npm-cache"
+echo "  sudo -u mempool npm run build --cache=/opt/mempool/.npm-cache"
+echo "  cd ../frontend"
+echo "  rm -rf node_modules package-lock.json"
+echo "  sudo -u mempool npm install --cache=/opt/mempool/.npm-cache"
+echo "  sudo -u mempool npm run build --cache=/opt/mempool/.npm-cache"
+echo "  cp -r dist/mempool/* /var/www/html/mempool/"
+echo "  systemctl restart mempool"
+echo ""
+echo "Troubleshooting Tips"
+echo "--------------------"
+echo "If the backend fails to start or build fails:"
+echo "  - Check npm cache permissions:"
+echo "    ls -ld /opt/mempool/.npm-cache"
+echo "    chown mempool:mempool /opt/mempool/.npm-cache"
+echo "  - Re-run backend installation and build:"
+echo "    cd /opt/mempool/backend"
+echo "    rm -rf node_modules package-lock.json"
+echo "    sudo -u mempool npm install --cache=/opt/mempool/.npm-cache --loglevel=verbose"
+echo "    sudo -u mempool npm install typescript --cache=/opt/mempool/.npm-cache"
+echo "    sudo -u mempool npm run build --cache=/opt/mempool/.npm-cache --loglevel=verbose"
+echo "Check service statuses:"
+echo "  systemctl status mempool"
+echo "  systemctl status apache2"
+if [ "$tor_enabled" == "yes" ]; then
+  echo "  systemctl status tor"
+fi
+if [ "$db_host" == "localhost" ]; then
+  echo "  systemctl status mariadb"
+fi
+echo "View logs:"
+echo "  journalctl -u mempool"
+echo "  journalctl -u apache2"
+if [ "$tor_enabled" == "yes" ]; then
+  echo "  journalctl -u tor"
+fi
+if [ "$db_host" == "localhost" ]; then
+  echo "  journalctl -u mariadb"
+fi
+echo "Ensure your Bitcoin node and Electrum server are running and accessible."
+if [ "$db_host" != "localhost" ]; then
+  echo "Verify that the MariaDB server at $db_host allows connections from this VM."
+fi
+echo "Check disk space and memory:"
+echo "  df -h"
+echo "  free -m"
+
+# Check service statuses and print recent logs
+echo ""
+echo "Service Status Checks"
+echo "====================="
+echo "Mempool Backend:"
+systemctl status mempool --no-pager
+echo ""
+echo "Apache2:"
+systemctl status apache2 --no-pager
+echo ""
+if [ "$tor_enabled" == "yes" ]; then
+  echo "TOR:"
+  systemctl status tor --no-pager
+  echo ""
+fi
+if [ "$db_host" == "localhost" ]; then
+  echo "MariaDB:"
+  systemctl status mariadb --no-pager
+  echo ""
+fi
+
+echo "Recent Logs"
+echo "==========="
+echo "Mempool Backend:"
+journalctl -u mempool --no-pager -n 20
+echo ""
+echo "Apache2:"
+journalctl -u apache2 --no-pager -n 20
+echo ""
+if [ "$tor_enabled" == "yes" ]; then
+  echo "TOR:"
+  journalctl -u tor --no-pager -n 20
+  echo ""
+fi
+if [ "$db_host" == "localhost" ]; then
+  echo "MariaDB:"
+  journalctl -u mariadb --no-pager -n 20
+  echo ""
+fi
