@@ -1,82 +1,100 @@
 # Mempool.space Deployment Script
 
-This bash script deploys a Mempool.space instance on a Debian-based server, offering a flexible setup for hosting a Bitcoin blockchain explorer. It is designed to accommodate users with existing infrastructure while providing options to install and configure all necessary components from scratch. The script supports deploying Mempool.space behind an Apache2 reverse proxy, using a MariaDB database, and connecting to a Bitcoin node (either existing or a newly installed Bitcoin Knots node).
+This Bash script deploys an instance of [Mempool.space](https://mempool.space) on an internal VM, serving it via Apache over HTTP. It integrates with your existing MariaDB server, Electrum server, and Bitcoin node, and optionally sets up a TOR hidden service. The script also provides configuration instructions to serve Mempool.space publicly via an existing Apache2 server over HTTPS.
 
 ## Features
-- Configurable Apache2 Setup: Uses an existing Apache2 server for reverse proxy by default, with an option to install and configure a new Apache2 server, including optional HTTPS certificates via Let's Encrypt.
-- Flexible MariaDB Integration: Connects to an existing MariaDB server or installs a new local instance with a pre-configured database and user.
-- Bitcoin Node Options: Connects to an existing Bitcoin node or installs Bitcoin Knots (based on the knots-installer script).
-- User-Friendly Prompts: Guides the user through configuration with interactive prompts for all necessary inputs.
-- Source Compilation: Uses pre-built binaries for simplicity (e.g., Bitcoin Knots), with comments indicating where source compilation can be implemented.
-- Error Handling: Includes basic checks to ensure critical steps complete successfully.
+
+- Deploys Mempool.space on an internal VM using Apache over HTTP.
+- Integrates with existing MariaDB, Electrum, and Bitcoin services.
+- Installs the latest stable LTS version of Node.js from NodeSource.
+- Creates a systemd service for the Mempool backend.
+- Optionally sets up a TOR hidden service.
+- Generates a random password for local MariaDB deployments.
+- Provides a detailed summary with access points, service details, and troubleshooting tips.
 
 ## Prerequisites
-- A Debian-based VM (e.g., Debian 11 or Ubuntu 20.04+).
-- Root access to the VM.
-- Internet access for downloading dependencies and repositories.
-- For users with existing infrastructure: connection details for an Apache2 server, MariaDB server, and Bitcoin node (RPC host, port, user, password).
-- Optional: A registered domain name if setting up Apache2 with Let's Encrypt HTTPS certificates.
 
-## Installation
-1. Clone this repository to your Debian VM:
-   git clone https://github.com/<your-username>/<your-repo>.git
-2. Navigate to the script directory:
-   cd <your-repo>
-3. Make the script executable:
-   chmod +x deploy-mempool.sh
-4. Run the script as root:
-   sudo ./deploy-mempool.sh
-5. Follow the interactive prompts to configure the deployment:
-   - Apache2: Choose whether to use an existing server or set up a new one (with optional Let's Encrypt HTTPS).
-   - MariaDB: Provide existing database details or opt to install a new local instance.
-   - Bitcoin Node: Provide existing node RPC details or opt to install Bitcoin Knots.
-6. Save any generated credentials (e.g., MariaDB or Bitcoin RPC passwords) displayed during setup.
+- **Operating System**: Debian-based system (e.g., Ubuntu).
+- **Existing Services**:
+  - Bitcoin node (RPC enabled).
+  - Electrum server.
+  - MariaDB server (if not using a local database).
+- **Network**: The internal VM’s IP must be accessible from the public Apache2 server for reverse proxying.
+- **Permissions**: Run the script with `sudo` on the internal VM.
 
 ## Usage
-The script automates the following:
-- Installs essential tools (git, curl, build-essential, Node.js).
-- Clones and configures the Mempool.space repository.
-- Sets up the Mempool backend and frontend.
-- Configures Apache2 (if chosen) to serve the frontend and proxy API requests.
-- Initializes the MariaDB database (if new) with the required schema.
-- Installs and configures Bitcoin Knots (if chosen) with a txindex-enabled node.
-- Creates systemd services for the Mempool backend and (if applicable) Bitcoin Knots.
 
-After deployment:
-- If using an existing Apache2 server, manually configure it to serve the frontend files (from /opt/mempool/frontend/dist) and proxy /api requests to http://localhost:8999.
-- Access Mempool.space via your configured domain or server IP.
-- Monitor services with:
+1. **Clone the Repository**:
+   Clone this repository to your internal VM using:
+   git clone https://github.com/yourusername/your-repo-name.git
+   Then navigate to the directory:
+   cd your-repo-name
+
+2. **Run the Script**:
+   Execute the script with sudo:
+   sudo ./deploy-mempool.sh
+
+3. **Follow the Prompts**:
+   - The script will ask for database, Bitcoin RPC, and Electrum server details.
+   - Press Enter to accept default values where applicable.
+   - If using a local database, a random password will be generated and displayed.
+
+4. **Public Access Configuration**:
+   - The script provides a configuration snippet for your existing Apache2 server to reverse proxy the internal deployment over HTTPS.
+   - Adjust the `ServerName` and SSL certificate paths in the snippet to match your setup.
+
+5. **TOR Hidden Service (Optional)**:
+   - If enabled, the script sets up a TOR hidden service and provides the onion address in the summary.
+
+## Configuration Details
+
+- **Database**:
+  - For local deployments, a MariaDB database is created with a generated password.
+  - For remote databases, ensure the MariaDB server allows connections from the VM’s IP.
+
+- **Bitcoin RPC**:
+  - Connects to your existing Bitcoin node using the provided RPC credentials.
+
+- **Electrum Server**:
+  - Integrates with your existing Electrum server for transaction data.
+
+- **Node.js**:
+  - Installs the latest stable LTS version from NodeSource to ensure compatibility.
+
+- **Systemd Service**:
+  - Creates `mempool.service` to manage the backend, running as the `mempool` user.
+
+## Summary and Troubleshooting
+
+After deployment, the script provides a summary including:
+
+- **Access Points**: Internal URL and TOR onion address (if enabled).
+- **Service Details**: Installed services and their statuses.
+- **Database Information**: Host, port, database name, user, and password (if generated).
+- **Public Access Instructions**: Configuration for your existing Apache2 server.
+- **Update Recommendations**: Steps to update Mempool.space using `git pull`.
+- **Troubleshooting Tips**: Commands to check service statuses and view logs.
+
+### Example Troubleshooting Commands
+
+- Check service statuses:
   systemctl status mempool
-  systemctl status bitcoind (if Bitcoin Knots was installed)
+  systemctl status apache2
+  systemctl status tor  (if TOR is enabled)
+  systemctl status mariadb  (if using a local database)
 
-## Configuration
-The script prompts for the following:
-- Apache2: Whether to set up a new reverse proxy and optional Let's Encrypt certificates (requires a domain name).
-- MariaDB: Connection details (host, database name, user, password) or permission to create a new database.
-- Bitcoin Node: RPC connection details (host, port, user, password) or permission to install Bitcoin Knots.
-
-Key configuration files:
-- Mempool: /opt/mempool/backend/mempool-config.json
-- Bitcoin Knots (if installed): /etc/bitcoin.conf
-- Apache2 (if configured): /etc/apache2/sites-available/mempool.conf
-
-## Customization
-- Paths: Modify MEMPOOL_DIR (/opt/mempool), BACKEND_PORT (8999), or FRONTEND_DIR (/var/www/html/mempool) in the script.
-- Source Compilation: Replace Bitcoin Knots binary installation with source compilation by following commented instructions in the script.
-- Security: Configure a firewall (e.g., ufw) and adjust user permissions post-deployment as needed.
+- View recent logs:
+  journalctl -u mempool -n 20
+  journalctl -u apache2 -n 20
+  journalctl -u tor -n 20  (if TOR is enabled)
+  journalctl -u mariadb -n 20  (if using a local database)
 
 ## Notes
-- The script assumes a clean Debian environment for new installations. Ensure no conflicting services (e.g., existing Apache2 or MariaDB configurations) are running if setting up new instances.
-- Bitcoin Knots installation is based on the knots-installer script (https://github.com/DrekiDegga/knots-installer), using a pre-built binary for simplicity.
-- For production use, secure all credentials and consider additional hardening (e.g., firewall rules, SSL/TLS configuration).
 
-## Contributing
-Contributions are welcome! Please submit pull requests or open issues for bugs, improvements, or feature requests.
+- Ensure your Bitcoin node, Electrum server, and MariaDB server (if remote) are running and configured to accept connections from the VM.
+- For remote MariaDB deployments, verify that the database user has the necessary privileges.
+- Adjust the public Apache2 configuration (`ServerName`, SSL paths) to match your environment.
 
-## License
-This project is licensed under the MIT License. See the LICENSE file for details.
+---
 
-## Acknowledgments
-- Mempool.space: https://github.com/mempool/mempool
-- Bitcoin Knots: https://bitcoinknots.org/
-- Original Bitcoin Knots installer: https://github.com/DrekiDegga/knots-installer
+This script simplifies the deployment of Mempool.space on an internal VM while leveraging your existing infrastructure. It ensures a secure and efficient setup with minimal user intervention.
