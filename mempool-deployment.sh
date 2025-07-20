@@ -302,8 +302,8 @@ packages="git curl"
 [ "$setup_tor_mempool" = "true" ] || [ "$setup_tor_fulcrum" = "true" ] || [ "$setup_tor_bitcoin" = "true" ] && packages="$packages tor"
 sudo apt install -y $packages
 
-# Install Node.js for Mempool
-curl -sL https://deb.nodesource.com/setup_16.x | sudo -E bash -
+# Install Node.js 20 LTS
+curl -sL https://deb.nodesource.com/setup_20.x | sudo -E bash -
 sudo apt install -y nodejs
 
 # Set up components based on user choices
