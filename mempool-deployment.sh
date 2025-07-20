@@ -66,20 +66,34 @@ echo "Installing Node.js LTS from NodeSource..."
 curl -fsSL https://deb.nodesource.com/setup_lts.x | bash -
 apt-get install -y nodejs
 
-# Create a system user for Mempool (if not already present)
+# Create a system user for Mempool
 if ! id -u mempool > /dev/null 2>&1; then
   echo "Creating mempool user..."
   adduser --system --group --no-create-home mempool
 fi
 
-# Set up npm cache directory for mempool user in a separate location
-echo "Setting up npm cache directory..."
-mkdir -p /opt/mempool-cache/.npm-cache
-chown -R mempool:mempool /opt/mempool-cache
+# Set up tools directory for Rust and npm cache
+echo "Setting up tools directory..."
+mkdir -p /opt/mempool-tools/rustup /opt/mempool-tools/cargo /opt/mempool-tools/.npm-cache
+chown -R mempool:mempool /opt/mempool-tools
+
+# Install Rust for mempool user
+echo "Installing Rust..."
+sudo -u mempool bash -c 'RUSTUP_HOME=/opt/mempool-tools/rustup CARGO_HOME=/opt/mempool-tools/cargo curl --proto "=https" --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --no-modify-path'
+
+# Set Rust version to 1.84
+sudo -u mempool bash -c 'export RUSTUP_HOME=/opt/mempool-tools/rustup CARGO_HOME=/opt/mempool-tools/cargo; /opt/mempool-tools/cargo/bin/rustup install 1.84'
+sudo -u mempool bash -c 'export RUSTUP_HOME=/opt/mempool-tools/rustup CARGO_HOME=/opt/mempool-tools/cargo; /opt/mempool-tools/cargo/bin/rustup default 1.84'
+
+# Verify Rust installation
+if ! sudo -u mempool bash -c 'export PATH=/opt/mempool-tools/cargo/bin:$PATH; cargo --version'; then
+  echo "Error: Rust installation failed."
+  exit 1
+fi
 
 # Clone Mempool.space repository
 echo "Cloning Mempool.space repository..."
-# Clean up existing /opt/mempool if it exists to ensure a fresh clone
+# Clean up existing /opt/mempool if it exists
 if [ -d /opt/mempool ]; then
   echo "Removing existing /opt/mempool directory..."
   rm -rf /opt/mempool
@@ -117,7 +131,7 @@ fi
 
 # Configure Mempool backend
 echo "Configuring Mempool backend..."
-cd /opt/mempool/backend
+cd /opt/mempool/backend || { echo "Error: Failed to change to /opt/mempool/backend directory."; exit 1; }
 cat << EOF > mempool-config.json
 {
   "MEMPOOL": {
@@ -171,58 +185,51 @@ rm -rf /opt/mempool/backend/node_modules /opt/mempool/backend/package-lock.json
 
 # Install backend dependencies
 echo "Installing backend dependencies..."
-sudo -u mempool npm install --cache=/opt/mempool/.npm-cache
+sudo -u mempool bash -c 'export PATH=/opt/mempool-tools/cargo/bin:$PATH; cd /opt/mempool/backend && npm install --cache=/opt/mempool-tools/.npm-cache'
 if [ $? -ne 0 ]; then
   echo "Error: npm install failed for backend. Check the output above for details."
   echo "Try running manually:"
-  echo "  cd /opt/mempool/backend"
-  echo "  sudo -u mempool npm install --cache=/opt/mempool/.npm-cache --loglevel=verbose"
+  echo "  sudo -u mempool bash -c 'export PATH=/opt/mempool-tools/cargo/bin:\$PATH; cd /opt/mempool/backend && npm install --cache=/opt/mempool-tools/.npm-cache --loglevel=verbose'"
   exit 1
 fi
 
 # Ensure typescript is installed
 echo "Ensuring typescript is installed..."
-sudo -u mempool npm install typescript --cache=/opt/mempool/.npm-cache
+sudo -u mempool bash -c 'export PATH=/opt/mempool-tools/cargo/bin:$PATH; cd /opt/mempool/backend && npm install typescript --cache=/opt/mempool-tools/.npm-cache'
 if [ ! -f /opt/mempool/backend/node_modules/typescript/bin/tsc ]; then
   echo "Error: TypeScript not installed correctly."
   echo "Try running manually:"
-  echo "  cd /opt/mempool/backend"
-  echo "  sudo -u mempool npm install typescript --cache=/opt/mempool/.npm-cache"
+  echo "  sudo -u mempool bash -c 'export PATH=/opt/mempool-tools/cargo/bin:\$PATH; cd /opt/mempool/backend && npm install typescript --cache=/opt/mempool-tools/.npm-cache --loglevel=verbose'"
   exit 1
 fi
 
 # Build backend
 echo "Building backend..."
-sudo -u mempool npm run build --cache=/opt/mempool/.npm-cache
+sudo -u mempool bash -c 'export PATH=/opt/mempool-tools/cargo/bin:$PATH; cd /opt/mempool/backend && npm run build --cache=/opt/mempool-tools/.npm-cache'
 if [ ! -f /opt/mempool/backend/dist/index.js ]; then
   echo "Error: Backend build failed. The file /opt/mempool/backend/dist/index.js was not created."
-  echo "Please check the output of 'npm run build' for errors."
   echo "Try running manually:"
-  echo "  cd /opt/mempool/backend"
-  echo "  sudo -u mempool npm run build --cache=/opt/mempool/.npm-cache --loglevel=verbose"
+  echo "  sudo -u mempool bash -c 'export PATH=/opt/mempool-tools/cargo/bin:\$PATH; cd /opt/mempool/backend && npm run build --cache=/opt/mempool-tools/.npm-cache --loglevel=verbose'"
   exit 1
 fi
 
 # Build frontend
 echo "Building frontend..."
-cd ../frontend
+cd /opt/mempool/frontend || { echo "Error: Failed to change to /opt/mempool/frontend directory."; exit 1; }
 rm -rf node_modules package-lock.json
-sudo -u mempool npm install --cache=/opt/mempool/.npm-cache
+sudo -u mempool bash -c 'export PATH=/opt/mempool-tools/cargo/bin:$PATH; cd /opt/mempool/frontend && npm install --cache=/opt/mempool-tools/.npm-cache'
 if [ $? -ne 0 ]; then
   echo "Error: npm install failed for frontend. Check the output above for details."
   echo "Try running manually:"
-  echo "  cd /opt/mempool/frontend"
-  echo "  sudo -u mempool npm install --cache=/opt/mempool/.npm-cache --loglevel=verbose"
+  echo "  sudo -u mempool bash -c 'export PATH=/opt/mempool-tools/cargo/bin:\$PATH; cd /opt/mempool/frontend && npm install --cache=/opt/mempool-tools/.npm-cache --loglevel=verbose'"
   exit 1
 fi
 sudo -u mempool cp mempool-frontend-config.sample.json mempool-frontend-config.json
-sudo -u mempool npm run build --cache=/opt/mempool/.npm-cache
+sudo -u mempool bash -c 'export PATH=/opt/mempool-tools/cargo/bin:$PATH; cd /opt/mempool/frontend && npm run build --cache=/opt/mempool-tools/.npm-cache'
 if [ ! -d dist/mempool ]; then
   echo "Error: Frontend build failed. The directory /opt/mempool/frontend/dist/mempool was not created."
-  echo "Please check the output of 'npm run build' for errors."
   echo "Try running manually:"
-  echo "  cd /opt/mempool/frontend"
-  echo "  sudo -u mempool npm run build --cache=/opt/mempool/.npm-cache --loglevel=verbose"
+  echo "  sudo -u mempool bash -c 'export PATH=/opt/mempool-tools/cargo/bin:\$PATH; cd /opt/mempool/frontend && npm run build --cache=/opt/mempool-tools/.npm-cache --loglevel=verbose'"
   exit 1
 fi
 mkdir -p /var/www/html/mempool
@@ -335,12 +342,12 @@ echo "  cd /opt/mempool"
 echo "  git pull"
 echo "  cd backend"
 echo "  rm -rf node_modules package-lock.json"
-echo "  sudo -u mempool npm install --cache=/opt/mempool/.npm-cache"
-echo "  sudo -u mempool npm run build --cache=/opt/mempool/.npm-cache"
+echo "  sudo -u mempool bash -c 'export PATH=/opt/mempool-tools/cargo/bin:\$PATH; npm install --cache=/opt/mempool-tools/.npm-cache'"
+echo "  sudo -u mempool bash -c 'export PATH=/opt/mempool-tools/cargo/bin:\$PATH; npm run build --cache=/opt/mempool-tools/.npm-cache'"
 echo "  cd ../frontend"
 echo "  rm -rf node_modules package-lock.json"
-echo "  sudo -u mempool npm install --cache=/opt/mempool/.npm-cache"
-echo "  sudo -u mempool npm run build --cache=/opt/mempool/.npm-cache"
+echo "  sudo -u mempool bash -c 'export PATH=/opt/mempool-tools/cargo/bin:\$PATH; npm install --cache=/opt/mempool-tools/.npm-cache'"
+echo "  sudo -u mempool bash -c 'export PATH=/opt/mempool-tools/cargo/bin:\$PATH; npm run build --cache=/opt/mempool-tools/.npm-cache'"
 echo "  cp -r dist/mempool/* /var/www/html/mempool/"
 echo "  systemctl restart mempool"
 echo ""
@@ -348,14 +355,16 @@ echo "Troubleshooting Tips"
 echo "--------------------"
 echo "If the backend fails to start or build fails:"
 echo "  - Check npm cache permissions:"
-echo "    ls -ld /opt/mempool/.npm-cache"
-echo "    chown mempool:mempool /opt/mempool/.npm-cache"
+echo "    ls -ld /opt/mempool-tools/.npm-cache"
+echo "    chown mempool:mempool /opt/mempool-tools/.npm-cache"
+echo "  - Check Rust installation:"
+echo "    sudo -u mempool bash -c 'export PATH=/opt/mempool-tools/cargo/bin:\$PATH; cargo --version'"
 echo "  - Re-run backend installation and build:"
 echo "    cd /opt/mempool/backend"
 echo "    rm -rf node_modules package-lock.json"
-echo "    sudo -u mempool npm install --cache=/opt/mempool/.npm-cache --loglevel=verbose"
-echo "    sudo -u mempool npm install typescript --cache=/opt/mempool/.npm-cache"
-echo "    sudo -u mempool npm run build --cache=/opt/mempool/.npm-cache --loglevel=verbose"
+echo "    sudo -u mempool bash -c 'export PATH=/opt/mempool-tools/cargo/bin:\$PATH; npm install --cache=/opt/mempool-tools/.npm-cache --loglevel=verbose'"
+echo "    sudo -u mempool bash -c 'export PATH=/opt/mempool-tools/cargo/bin:\$PATH; npm install typescript --cache=/opt/mempool-tools/.npm-cache'"
+echo "    sudo -u mempool bash -c 'export PATH=/opt/mempool-tools/cargo/bin:\$PATH; npm run build --cache=/opt/mempool-tools/.npm-cache --loglevel=verbose'"
 echo "Check service statuses:"
 echo "  systemctl status mempool"
 echo "  systemctl status apache2"
