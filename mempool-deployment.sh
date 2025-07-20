@@ -86,7 +86,30 @@ sudo -u mempool bash -c 'source $HOME/.cargo/env && cargo --version'
 
 # Clone Mempool repository as mempool user
 echo "Cloning Mempool.space repository..."
-sudo -u mempool git clone https://github.com/mempool/mempool.git /opt/mempool
+# Clean up existing /opt/mempool if it exists
+if [ -d /opt/mempool ]; then
+  echo "Removing existing /opt/mempool directory..."
+  rm -rf /opt/mempool
+fi
+mkdir -p /opt
+cd /opt || { echo "Error: Failed to change to /opt directory."; exit 1; }
+git clone https://github.com/mempool/mempool.git
+if [ $? -ne 0 ]; then
+  echo "Error: Failed to clone Mempool repository."
+  exit 1
+fi
+cd mempool || { echo "Error: Failed to change to /opt/mempool directory."; exit 1; }
+latestrelease=$(curl -s https://api.github.com/repos/mempool/mempool/releases/latest | grep tag_name | head -1 | cut -d '"' -f4)
+if [ -z "$latestrelease" ]; then
+  echo "Error: Failed to fetch latest Mempool release tag."
+  exit 1
+fi
+git checkout "$latestrelease"
+if [ $? -ne 0 ]; then
+  echo "Error: Failed to checkout release $latestrelease."
+  exit 1
+fi
+chown -R mempool:mempool /opt/mempool
 
 # Set up database if local
 if [ "$db_host" == "localhost" ]; then
