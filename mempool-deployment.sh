@@ -61,7 +61,7 @@ if [ "$tor_enabled" == "yes" ]; then
   apt-get install -y tor
 fi
 
-# Install Node.js LTS from NodeSource
+# Install Node.js LTS from NodeSource (latest LTS version)
 echo "Installing Node.js LTS..."
 curl -fsSL https://deb.nodesource.com/setup_lts.x | bash -
 apt-get install -y nodejs
@@ -72,44 +72,35 @@ if ! id -u mempool > /dev/null 2>&1; then
   useradd -m -s /bin/false mempool
 fi
 
-# Install Rust for mempool user
+# Install Rust for mempool user (latest stable version)
 echo "Installing Rust for mempool user..."
 sudo -u mempool bash -c 'curl --proto "=https" --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y'
 
-# Set default Rust toolchain
-echo "Setting default Rust toolchain to 1.84..."
-sudo -u mempool bash -c 'source $HOME/.cargo/env && rustup default 1.84'
+# Set default Rust toolchain to stable (latest stable version)
+echo "Setting default Rust toolchain to stable..."
+sudo -u mempool bash -c 'source $HOME/.cargo/env && rustup default stable'
 
 # Verify Rust installation
 echo "Verifying Rust installation..."
 sudo -u mempool bash -c 'source $HOME/.cargo/env && cargo --version'
 
-# Clone Mempool repository as mempool user
+# Create /opt/mempool directory with correct permissions *before* cloning
+echo "Creating /opt/mempool directory with correct permissions..."
+if [ ! -d "/opt/mempool" ]; then
+  mkdir -p /opt/mempool
+fi
+chown mempool:mempool /opt/mempool
+chmod 755 /opt/mempool
+
+# Clone Mempool repository as mempool user (latest release)
 echo "Cloning Mempool.space repository..."
-# Clean up existing /opt/mempool if it exists
-if [ -d /opt/mempool ]; then
-  echo "Removing existing /opt/mempool directory..."
-  rm -rf /opt/mempool
-fi
-mkdir -p /opt
-cd /opt || { echo "Error: Failed to change to /opt directory."; exit 1; }
-git clone https://github.com/mempool/mempool.git
-if [ $? -ne 0 ]; then
-  echo "Error: Failed to clone Mempool repository."
-  exit 1
-fi
-cd mempool || { echo "Error: Failed to change to /opt/mempool directory."; exit 1; }
-latestrelease=$(curl -s https://api.github.com/repos/mempool/mempool/releases/latest | grep tag_name | head -1 | cut -d '"' -f4)
-if [ -z "$latestrelease" ]; then
-  echo "Error: Failed to fetch latest Mempool release tag."
-  exit 1
-fi
-git checkout "$latestrelease"
-if [ $? -ne 0 ]; then
-  echo "Error: Failed to checkout release $latestrelease."
-  exit 1
-fi
-chown -R mempool:mempool /opt/mempool
+sudo -u mempool git clone https://github.com/mempool/mempool.git /opt/mempool
+
+# Checkout the latest release
+echo "Checking out the latest Mempool release..."
+cd /opt/mempool
+latest_release=$(curl -s https://api.github.com/repos/mempool/mempool/releases/latest | grep "tag_name" | cut -d '"' -f4)
+sudo -u mempool git checkout "$latest_release"
 
 # Set up database if local
 if [ "$db_host" == "localhost" ]; then
