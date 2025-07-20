@@ -1,337 +1,354 @@
 #!/bin/bash
 
-# Check if running as root
-if [ "$EUID" -ne 0 ]; then
-  echo "Please run as root"
-  exit 1
-fi
+# Exit on any error
+set -e
 
-# Update package lists and install essential tools
-echo "Updating package lists and installing essential tools..."
-apt update
-apt install -y git curl build-essential wget openssl || {
-  echo "Failed to install essential tools"
-  exit 1
+# Variables to store user choices and inputs
+vm_ip=$(hostname -I | awk '{print $1}')  # Get the VM's IP address
+
+# Function to prompt for yes/no and return true/false
+prompt_yes_no() {
+    local prompt="$1"
+    while true; do
+        read -p "$prompt (y/n): " choice
+        case "$choice" in
+            y|Y) return 0;;
+            n|N) return 1;;
+            *) echo "Please enter y or n.";;
+        esac
+    done
 }
 
-# Install Node.js if not present
-if ! command -v node &> /dev/null; then
-  echo "Installing Node.js..."
-  curl -fsSL https://deb.nodesource.com/setup_16.x | bash -
-  apt install -y nodejs || {
-    echo "Failed to install Node.js"
-    exit 1
-  }
-fi
-
-# Define variables
-MEMPOOL_DIR="/opt/mempool"
-BACKEND_PORT=8999
-FRONTEND_DIR="/var/www/html/mempool"
-
-# Create mempool user for running the service
-echo "Creating mempool system user..."
-adduser --system --group --no-create-home mempool || {
-  echo "Failed to create mempool user"
-  exit 1
-}
-
-# Prompt for Apache2 setup
-echo -e "\nDo you want to set up a new Apache2 reverse proxy? (yes/no)"
-echo "If 'no', the script assumes an existing Apache2 server will be configured manually."
-read -p "Choice: " setup_apache
-if [ "$setup_apache" = "yes" ]; then
-  echo "Enter the domain name for Mempool.space (e.g., mempool.example.com):"
-  read -p "Domain: " domain
-  echo "Do you want to obtain HTTPS certificates from Let's Encrypt? (yes/no)"
-  read -p "Choice: " setup_cert
-fi
-
-# Prompt for MariaDB setup
-echo -e "\nDo you want to use an existing MariaDB server? (yes/no)"
-echo "If 'yes', provide connection details; if 'no', a new local MariaDB will be set up."
-read -p "Choice: " use_existing_db
-if [ "$use_existing_db" = "no" ]; then
-  db_host="localhost"
-  db_name="mempool"
-  db_user="mempool_user"
-  db_pass=$(openssl rand -base64 12)
-  echo "Generated MariaDB password: $db_pass (save this securely)"
-else
-  echo "Enter database host:"
-  read -p "Host: " db_host
-  echo "Enter database name:"
-  read -p "Name: " db_name
-  echo "Enter database user:"
-  read -p "User: " db_user
-  echo "Enter database password:"
-  read -p "Password: " db_pass
-fi
-
-# Prompt for Bitcoin node setup
-echo -e "\nDo you want to use an existing Bitcoin node? (yes/no)"
-echo "If 'yes', provide RPC details; if 'no', Bitcoin Knots will be installed."
-read -p "Choice: " use_existing_node
-if [ "$use_existing_node" = "no" ]; then
-  rpc_host="localhost"
-  rpc_port=8332
-  rpc_user="bitcoinrpc"
-  rpc_pass=$(openssl rand -base64 12)
-  echo "Generated Bitcoin RPC password: $rpc_pass (save this securely)"
-else
-  echo "Enter Bitcoin node RPC host:"
-  read -p "Host: " rpc_host
-  echo "Enter Bitcoin node RPC port:"
-  read -p "Port: " rpc_port
-  echo "Enter Bitcoin node RPC user:"
-  read -p "User: " rpc_user
-  echo "Enter Bitcoin node RPC password:"
-  read -p "Password: " rpc_pass
-fi
-
-# Set up new MariaDB if chosen
-if [ "$use_existing_db" = "no" ]; then
-  echo "Installing and configuring MariaDB..."
-  apt install -y mariadb-server || {
-    echo "Failed to install MariaDB"
-    exit 1
-  }
-  mysql_secure_installation
-  mysql -e "CREATE DATABASE $db_name;" || {
-    echo "Failed to create database"
-    exit 1
-  }
-  mysql -e "CREATE USER '$db_user'@'localhost' IDENTIFIED BY '$db_pass';" || {
-    echo "Failed to create database user"
-    exit 1
-  }
-  mysql -e "GRANT ALL PRIVILEGES ON $db_name.* TO '$db_user'@'localhost';" || {
-    echo "Failed to grant privileges"
-    exit 1
-  }
-  mysql -e "FLUSH PRIVILEGES;"
-fi
-
-# Set up Bitcoin Knots if chosen
-if [ "$use_existing_node" = "no" ]; then
-  echo "Installing Bitcoin Knots..."
-  # Using pre-built binary as in your knots-installer; source compilation can be added here
-  KNOTS_VERSION="25.0.knots20220531"
-  wget https://bitcoinknots.org/files/25.x/$KNOTS_VERSION/bitcoin-$KNOTS_VERSION-x86_64-linux-gnu.tar.gz || {
-    echo "Failed to download Bitcoin Knots"
-    exit 1
-  }
-  tar -xvf bitcoin-$KNOTS_VERSION-x86_64-linux-gnu.tar.gz || {
-    echo "Failed to extract Bitcoin Knots"
-    exit 1
-  }
-  mv bitcoin-$KNOTS_VERSION/bin/* /usr/local/bin/ || {
-    echo "Failed to install Bitcoin Knots binaries"
-    exit 1
-  }
-  rm -rf bitcoin-$KNOTS_VERSION*
-  adduser --system --group --no-create-home bitcoin || {
-    echo "Failed to create bitcoin user"
-    exit 1
-  }
-  mkdir -p /var/lib/bitcoind
-  chown bitcoin:bitcoin /var/lib/bitcoind
-  cat > /etc/bitcoin.conf << EOL
-rpcuser=$rpc_user
-rpcpassword=$rpc_pass
-rpcport=$rpc_port
+# Function to set up Bitcoin Knots
+setup_bitcoin_knots() {
+    echo "Setting up Bitcoin Knots..."
+    sudo apt install -y build-essential libtool autotools-dev automake pkg-config bsdmainutils python3 libevent-dev libboost-system-dev libboost-filesystem-dev libboost-chrono-dev libboost-test-dev libboost-thread-dev libsqlite3-dev libminiupnpc-dev libzmq3-dev
+    cd ~
+    git clone https://github.com/bitcoinknots/bitcoin.git bitcoin-knots
+    cd bitcoin-knots
+    ./autogen.sh
+    ./configure
+    make -j$(nproc)
+    sudo make install
+    mkdir -p ~/.bitcoin
+    cat <<EOF > ~/.bitcoin/bitcoin.conf
+rpcuser=$btc_user
+rpcpassword=$btc_pass
+rpcport=$btc_port
+rpcbind=127.0.0.1
+rpcallowip=127.0.0.1
 server=1
 txindex=1
-EOL
-  chown bitcoin:bitcoin /etc/bitcoin.conf
-  chmod 600 /etc/bitcoin.conf
-  cat > /etc/systemd/system/bitcoind.service << EOL
-[Unit]
-Description=Bitcoin daemon
-After=network.target
-[Service]
-ExecStart=/usr/local/bin/bitcoind -daemon -conf=/etc/bitcoin.conf -datadir=/var/lib/bitcoind
-User=bitcoin
-Type=forking
-Restart=always
-TimeoutSec=120
-RestartSec=30
-[Install]
-WantedBy=multi-user.target
-EOL
-  systemctl enable bitcoind || {
-    echo "Failed to enable bitcoind service"
-    exit 1
-  }
-  systemctl start bitcoind || {
-    echo "Failed to start bitcoind service"
-    exit 1
-  }
-  # Note: To compile from source, replace the above with git clone, dependencies, and make
-fi
-
-# Deploy Mempool.space
-echo "Cloning Mempool.space repository..."
-git clone https://github.com/mempool/mempool.git "$MEMPOOL_DIR" || {
-  echo "Failed to clone Mempool repository"
-  exit 1
-}
-chown -R mempool:mempool "$MEMPOOL_DIR"
-
-# Set up Mempool backend
-echo "Setting up Mempool backend..."
-cd "$MEMPOOL_DIR/backend"
-sudo -u mempool npm install || {
-  echo "Failed to install backend dependencies"
-  exit 1
-}
-# Check if build is needed; assuming npm install prepares dist/index.js
-if [ -f "package.json" ] && grep -q '"build"' package.json; then
-  sudo -u mempool npm run build || {
-    echo "Failed to build backend"
-    exit 1
-  }
-fi
-
-# Configure mempool-config.json
-echo "Configuring Mempool backend..."
-sed -i "s/\"BITCOIN_NODE_HOST\": \".*\"/\"BITCOIN_NODE_HOST\": \"$rpc_host\"/" mempool-config.json || {
-  echo "Failed to configure Bitcoin node host"
-  exit 1
-}
-sed -i "s/\"BITCOIN_NODE_PORT\": .*/\"BITCOIN_NODE_PORT\": $rpc_port/" mempool-config.json || {
-  echo "Failed to configure Bitcoin node port"
-  exit 1
-}
-sed -i "s/\"BITCOIN_NODE_USER\": \".*\"/\"BITCOIN_NODE_USER\": \"$rpc_user\"/" mempool-config.json || {
-  echo "Failed to configure Bitcoin node user"
-  exit 1
-}
-sed -i "s/\"BITCOIN_NODE_PASS\": \".*\"/\"BITCOIN_NODE_PASS\": \"$rpc_pass\"/" mempool-config.json || {
-  echo "Failed to configure Bitcoin node password"
-  exit 1
-}
-sed -i "s/\"MYSQL_HOST\": \".*\"/\"MYSQL_HOST\": \"$db_host\"/" mempool-config.json || {
-  echo "Failed to configure MySQL host"
-  exit 1
-}
-sed -i "s/\"MYSQL_DATABASE\": \".*\"/\"MYSQL_DATABASE\": \"$db_name\"/" mempool-config.json || {
-  echo "Failed to configure MySQL database"
-  exit 1
-}
-sed -i "s/\"MYSQL_USER\": \".*\"/\"MYSQL_USER\": \"$db_user\"/" mempool-config.json || {
-  echo "Failed to configure MySQL user"
-  exit 1
-}
-sed -i "s/\"MYSQL_PASSWORD\": \".*\"/\"MYSQL_PASSWORD\": \"$db_pass\"/" mempool-config.json || {
-  echo "Failed to configure MySQL password"
-  exit 1
+daemon=1
+EOF
+    bitcoind &
+    sleep 5  # Wait for bitcoind to start
+    echo "Bitcoin Knots installed and running."
+    btc_host="127.0.0.1"
 }
 
-# Initialize database schema if new database
-if [ "$use_existing_db" = "no" ]; then
-  echo "Initializing Mempool database schema..."
-  mysql -u "$db_user" -p"$db_pass" "$db_name" < "$MEMPOOL_DIR/mariadb-structure.sql" || {
-    echo "Failed to initialize database schema"
-    exit 1
-  }
-fi
-
-# Set up systemd service for Mempool backend
-echo "Setting up Mempool backend service..."
-cat > /etc/systemd/system/mempool.service << EOL
-[Unit]
-Description=Mempool Backend
-After=network.target
-[Service]
-User=mempool
-WorkingDirectory=$MEMPOOL_DIR/backend
-ExecStart=/usr/bin/node --max-old-space-size=2048 dist/index.js
-Restart=always
-[Install]
-WantedBy=multi-user.target
-EOL
-systemctl enable mempool || {
-  echo "Failed to enable mempool service"
-  exit 1
-}
-systemctl start mempool || {
-  echo "Failed to start mempool service"
-  exit 1
+# Function to set up Fulcrum
+setup_fulcrum() {
+    echo "Setting up Fulcrum..."
+    curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+    source "$HOME/.cargo/env"
+    cd ~
+    git clone https://github.com/cculianu/Fulcrum.git
+    cd Fulcrum
+    cargo build --release
+    mkdir -p ~/fulcrum
+    cp target/release/Fulcrum ~/fulcrum/
+    cores=$(nproc)
+    cat <<EOF > ~/fulcrum/fulcrum.conf
+rpcuser=fulcrum_user
+rpcpassword=fulcrum_pass
+rpcport=50002
+bitcoind=$btc_host:$btc_port
+bitcoind_user=$btc_user
+bitcoind_pass=$btc_pass
+worker_threads=$cores
+EOF
+    cd ~/fulcrum
+    ./Fulcrum &
+    sleep 5
+    echo "Fulcrum installed and running on port 50002."
 }
 
-# Set up Mempool frontend
-echo "Setting up Mempool frontend..."
-cd "$MEMPOOL_DIR/frontend"
-sudo -u mempool npm install || {
-  echo "Failed to install frontend dependencies"
-  exit 1
-}
-sudo -u mempool npm run build || {
-  echo "Failed to build frontend"
-  exit 1
+# Function to set up MariaDB locally
+setup_mariadb() {
+    echo "Setting up MariaDB locally..."
+    sudo apt install -y mariadb-server
+    sudo mysql_secure_installation <<EOF
+
+y
+root_password
+root_password
+y
+y
+y
+y
+EOF
+    sudo mysql -u root -proot_password <<EOF
+CREATE DATABASE mempool;
+CREATE USER 'mempool_user'@'localhost' IDENTIFIED BY 'mempool_pass';
+GRANT ALL PRIVILEGES ON mempool.* TO 'mempool_user'@'localhost';
+FLUSH PRIVILEGES;
+EOF
+    db_host="127.0.0.1"
+    db_port=3306
+    db_user="mempool_user"
+    db_pass="mempool_pass"
+    db_name="mempool"
+    echo "MariaDB installed and configured."
 }
 
-# Configure Apache2 if chosen
-if [ "$setup_apache" = "yes" ]; then
-  echo "Configuring Apache2 reverse proxy..."
-  mkdir -p "$FRONTEND_DIR"
-  cp -r dist/* "$FRONTEND_DIR" || {
-    echo "Failed to copy frontend files"
-    exit 1
+# Function to set up Mempool
+setup_mempool() {
+    echo "Setting up Mempool..."
+    sudo apt install -y nodejs npm
+    sudo npm install -g pm2
+    sudo npm install -g http-server
+    cd ~
+    git clone https://github.com/mempool/mempool.git
+    cd mempool/backend
+    npm install
+    cd ../frontend
+    npm install
+    npm run build
+    cd ..
+
+    # Determine backend type
+    if [ "$setup_fulcrum" = "true" ] || [ -n "$electrum_host" ]; then
+        backend="electrum"
+        if [ "$setup_fulcrum" = "true" ]; then
+            electrum_host="127.0.0.1"
+            electrum_port=50002
+        fi
+    else
+        backend="core"
+    fi
+
+    # Generate Mempool config
+    cat <<EOF > backend/config.json
+{
+  "MEMPOOL": {
+    "NETWORK": "mainnet",
+    "BACKEND": "$backend",
+    "HTTP_PORT": 8999
+  },
+  "CORE_RPC": {
+    "HOST": "$btc_host",
+    "PORT": $btc_port,
+    "USERNAME": "$btc_user",
+    "PASSWORD": "$btc_pass"
+  },
+  "ELECTRUM": {
+    "HOST": "$electrum_host",
+    "PORT": $electrum_port,
+    "TLS_ENABLED": true
+  },
+  "DATABASE": {
+    "ENABLED": true,
+    "HOST": "$db_host",
+    "PORT": $db_port,
+    "USERNAME": "$db_user",
+    "PASSWORD": "$db_pass",
+    "DATABASE": "$db_name"
   }
-  apt install -y apache2 || {
-    echo "Failed to install Apache2"
-    exit 1
-  }
-  a2enmod proxy proxy_http rewrite || {
-    echo "Failed to enable Apache2 modules"
-    exit 1
-  }
-  cat > /etc/apache2/sites-available/mempool.conf << EOL
+}
+EOF
+    cd backend
+    pm2 start npm --name "mempool-backend" -- run start
+    cd ../frontend
+    pm2 start http-server --name "mempool-frontend" -- dist/mempool --port 4200
+    echo "Mempool installed and running locally on http://$vm_ip:4200"
+}
+
+# Function to set up Apache2 locally
+setup_apache() {
+    echo "Setting up Apache2 locally..."
+    sudo apt install -y apache2
+    sudo a2enmod proxy proxy_http rewrite
+    cat <<EOF | sudo tee /etc/apache2/sites-available/mempool.conf
 <VirtualHost *:80>
-    ServerName $domain
-    DocumentRoot $FRONTEND_DIR
-    <Directory $FRONTEND_DIR>
-        Options Indexes FollowSymLinks
-        AllowOverride All
-        Require all granted
-    </Directory>
-    ProxyPass /api http://localhost:$BACKEND_PORT
-    ProxyPassReverse /api http://localhost:$BACKEND_PORT
+    ServerName $domain_name
+    ProxyPass /api http://127.0.0.1:8999/
+    ProxyPassReverse /api http://127.0.0.1:8999/
+    ProxyPass / http://127.0.0.1:4200/
+    ProxyPassReverse / http://127.0.0.1:4200/
 </VirtualHost>
-EOL
-  a2ensite mempool || {
-    echo "Failed to enable Apache2 site"
-    exit 1
-  }
-  systemctl reload apache2 || {
-    echo "Failed to reload Apache2"
-    exit 1
-  }
-  if [ "$setup_cert" = "yes" ]; then
-    echo "Setting up Let's Encrypt certificates..."
-    apt install -y certbot python3-certbot-apache || {
-      echo "Failed to install Certbot"
-      exit 1
-    }
-    certbot --apache -d "$domain" || {
-      echo "Failed to obtain Let's Encrypt certificate"
-      exit 1
-    }
-  fi
+EOF
+    sudo a2ensite mempool.conf
+    sudo systemctl reload apache2
+
+    if [ "$setup_letsencrypt" = "true" ]; then
+        sudo apt install -y certbot python3-certbot-apache
+        sudo certbot --apache -d "$domain_name" --non-interactive --agree-tos --email user@example.com
+        echo "Let's Encrypt certificate set up for $domain_name."
+    fi
+    echo "Apache2 configured to serve Mempool locally."
+}
+
+# Function to set up Tor hidden service
+setup_tor_hidden_service() {
+    local service_name="$1"
+    local local_port="$2"
+    local tor_port="$3"
+    echo "Setting up Tor hidden service for $service_name..."
+    sudo apt install -y tor
+    sudo bash -c "cat <<EOF >> /etc/tor/torrc
+HiddenServiceDir /var/lib/tor/$service_name/
+HiddenServicePort $tor_port 127.0.0.1:$local_port
+EOF"
+    sudo systemctl restart tor
+    sleep 5
+    onion_address=$(sudo cat "/var/lib/tor/$service_name/hostname")
+    echo "$service_name Tor hidden service available at: $onion_address"
+}
+
+# Main script starts here
+echo "Welcome to the Mempool.space deployment script for Debian."
+echo "This script will deploy Mempool on your internal NAT with customizable options."
+echo "You can use existing services or set up new ones locally as needed."
+echo ""
+
+# Update package lists
+sudo apt update
+
+# Prompt for Bitcoin Knots
+if prompt_yes_no "Do you want to set up Bitcoin Knots locally (compiles from source)?"; then
+    setup_bitcoin_knots="true"
+    read -p "Enter Bitcoin RPC username: " btc_user
+    read -s -p "Enter Bitcoin RPC password: " btc_pass
+    echo
+    btc_port=8332  # Default RPC port
 else
-  echo -e "\nMempool frontend built at $MEMPOOL_DIR/frontend/dist"
-  echo "Please configure your existing Apache2 server to:"
-  echo "1. Serve the static files from $MEMPOOL_DIR/frontend/dist"
-  echo "2. Proxy /api requests to http://localhost:$BACKEND_PORT"
+    setup_bitcoin_knots="false"
+    echo "Using existing Bitcoin node."
+    read -p "Enter existing Bitcoin node RPC host: " btc_host
+    read -p "Enter existing Bitcoin node RPC port (default 8332): " btc_port
+    btc_port=${btc_port:-8332}
+    read -p "Enter existing Bitcoin node RPC username: " btc_user
+    read -s -p "Enter existing Bitcoin node RPC password: " btc_pass
+    echo
 fi
 
-echo -e "\nDeployment complete!"
-echo "Mempool.space backend is running on port $BACKEND_PORT"
-if [ "$use_existing_db" = "no" ]; then
-  echo "MariaDB credentials: User: $db_user, Password: $db_pass, Database: $db_name"
+# Prompt for Fulcrum
+if prompt_yes_no "Do you want to set up Fulcrum locally (compiles from source)?"; then
+    setup_fulcrum="true"
+else
+    setup_fulcrum="false"
+    if prompt_yes_no "Do you have an existing Elektum server for Mempool to use?"; then
+        read -p "Enter existing Electrum server host: " electrum_host
+        read -p "Enter existing Electrum server port (default 50002): " electrum_port
+        electrum_port=${electrum_port:-50002}
+    fi
 fi
-if [ "$use_existing_node" = "no" ]; then
-  echo "Bitcoin Knots RPC credentials: User: $rpc_user, Password: $rpc_pass, Port: $rpc_port"
+
+# Prompt for MariaDB
+if prompt_yes_no "Do you want to set up MariaDB locally?"; then
+    setup_mariadb="true"
+else
+    setup_mariadb="false"
+    echo "Using existing MariaDB server."
+    read -p "Enter existing MariaDB host: " db_host
+    read -p "Enter existing MariaDB port (default 3306): " db_port
+    db_port=${db_port:-3306}
+    read -p "Enter existing MariaDB username: " db_user
+    read -s -p "Enter existing MariaDB password: " db_pass
+    echo
+    read -p "Enter existing MariaDB database name: " db_name
 fi
+
+# Prompt for Apache2
+if prompt_yes_no "Do you want to set up Apache2 locally to serve Mempool publicly?"; then
+    setup_apache="true"
+    read -p "Enter your domain name for Apache2 (e.g., example.com): " domain_name
+    if prompt_yes_no "Do you want to set up Let's Encrypt HTTPS certificates?"; then
+        setup_letsencrypt="true"
+    else
+        setup_letsencrypt="false"
+    fi
+else
+    setup_apache="false"
+    echo "Mempool will be served locally; configure your existing Apache2 server for public access."
+fi
+
+# Prompt for Tor hidden services
+if prompt_yes_no "Do you want to set up a Tor hidden service for Mempool?"; then
+    setup_tor_mempool="true"
+else
+    setup_tor_mempool="false"
+fi
+
+if [ "$setup_fulcrum" = "true" ] && prompt_yes_no "Do you want to set up a Tor hidden service for Fulcrum?"; then
+    setup_tor_fulcrum="true"
+else
+    setup_tor_fulcrum="false"
+fi
+
+if [ "$setup_bitcoin_knots" = "true" ] && prompt_yes_no "Do you want to set up a Tor hidden service for Bitcoin Knots?"; then
+    setup_tor_bitcoin="true"
+else
+    setup_tor_bitcoin="false"
+fi
+
+# Install dependencies based on choices
+packages="git curl"
+[ "$setup_bitcoin_knots" = "true" ] && packages="$packages build-essential libtool autotools-dev automake pkg-config bsdmainutils python3 libevent-dev libboost-system-dev libboost-filesystem-dev libboost-chrono-dev libboost-test-dev libboost-thread-dev libsqlite3-dev libminiupnpc-dev libzmq3-dev"
+[ "$setup_mariadb" = "true" ] && packages="$packages mariadb-server"
+[ "$setup_apache" = "true" ] && packages="$packages apache2"
+[ "$setup_letsencrypt" = "true" ] && packages="$packages certbot python3-certbot-apache"
+[ "$setup_tor_mempool" = "true" ] || [ "$setup_tor_fulcrum" = "true" ] || [ "$setup_tor_bitcoin" = "true" ] && packages="$packages tor"
+sudo apt install -y $packages
+
+# Install Node.js for Mempool
+curl -sL https://deb.nodesource.com/setup_16.x | sudo -E bash -
+sudo apt install -y nodejs
+
+# Set up components based on user choices
+[ "$setup_bitcoin_knots" = "true" ] && setup_bitcoin_knots
+[ "$setup_fulcrum" = "true" ] && setup_fulcrum
+[ "$setup_mariadb" = "true" ] && setup_mariadb
+setup_mempool
+[ "$setup_apache" = "true" ] && setup_apache
+
+# Set up Tor hidden services
+[ "$setup_tor_mempool" = "true" ] && setup_tor_hidden_service "mempool" "4200" "80"
+[ "$setup_tor_fulcrum" = "true" ] && setup_tor_hidden_service "fulcrum" "50002" "50002"
+[ "$setup_tor_bitcoin" = "true" ] && setup_tor_hidden_service "bitcoin" "8333" "8333"
+
+# Provide final instructions
+echo ""
+echo "Mempool deployment completed successfully!"
+echo "Local access: http://$vm_ip:4200"
+[ "$setup_apache" = "true" ] && echo "Public access (if configured): http${setup_letsencrypt:+s}://$domain_name"
+
+if [ "$setup_tor_mempool" = "true" ]; then
+    onion_address=$(sudo cat /var/lib/tor/mempool/hostname)
+    echo "Mempool Tor hidden service: $onion_address"
+fi
+if [ "$setup_tor_fulcrum" = "true" ]; then
+    onion_address=$(sudo cat /var/lib/tor/fulcrum/hostname)
+    echo "Fulcrum Tor hidden service: $onion_address"
+fi
+if [ "$setup_tor_bitcoin" = "true" ]; then
+    onion_address=$(sudo cat /var/lib/tor/bitcoin/hostname)
+    echo "Bitcoin Knots Tor hidden service: $onion_address"
+fi
+
+if [ "$setup_apache" != "true" ]; then
+    echo ""
+    echo "Since you did not set up Apache2 locally, configure your existing Apache2 server with:"
+    echo "<VirtualHost *:80>"
+    echo "    ServerName yourdomain.com"
+    echo "    ProxyPass /api http://$vm_ip:8999/"
+    echo "    ProxyPassReverse /api http://$vm_ip:8999/"
+    echo "    ProxyPass / http://$vm_ip:4200/"
+    echo "    ProxyPassReverse / http://$vm_ip:4200/"
+    echo "</VirtualHost>"
+    echo "Replace 'yourdomain.com' with your domain and ensure the VM IP ($vm_ip) is correct."
+    echo "For HTTPS, obtain a certificate separately on your existing server."
+fi
+
+echo "Deployment complete. Check services with 'pm2 list' and logs with 'pm2 logs'."
