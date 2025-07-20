@@ -77,20 +77,19 @@ echo "Setting up tools directory..."
 mkdir -p /opt/mempool-tools/rustup /opt/mempool-tools/cargo /opt/mempool-tools/.npm-cache
 chown -R mempool:mempool /opt/mempool-tools
 
-# Install Rust for mempool user
+# Install Rust for mempool user with custom HOME
 echo "Installing Rust..."
-sudo -u mempool bash -c 'RUSTUP_HOME=/opt/mempool-tools/rustup CARGO_HOME=/opt/mempool-tools/cargo curl --proto "=https" --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --no-modify-path'
+sudo -u mempool bash -c 'HOME=/opt/mempool-tools RUSTUP_HOME=/opt/mempool-tools/rustup CARGO_HOME=/opt/mempool-tools/cargo curl --proto "=https" --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --no-modify-path'
 
-# Set Rust version to 1.84
-sudo -u mempool bash -c 'export RUSTUP_HOME=/opt/mempool-tools/rustup CARGO_HOME=/opt/mempool-tools/cargo; /opt/mempool-tools/cargo/bin/rustup install 1.84'
-sudo -u mempool bash -c 'export RUSTUP_HOME=/opt/mempool-tools/rustup CARGO_HOME=/opt/mempool-tools/cargo; /opt/mempool-tools/cargo/bin/rustup default 1.84'
+# Set Rust version to 1.84 (optional, adjust as needed)
+sudo -u mempool bash -c 'export HOME=/opt/mempool-tools RUSTUP_HOME=/opt/mempool-tools/rustup CARGO_HOME=/opt/mempool-tools/cargo; /opt/mempool-tools/cargo/bin/rustup install 1.84'
+sudo -u mempool bash -c 'export HOME=/opt/mempool-tools RUSTUP_HOME=/opt/mempool-tools/rustup CARGO_HOME=/opt/mempool-tools/cargo; /opt/mempool-tools/cargo/bin/rustup default 1.84'
 
 # Verify Rust installation
-if ! sudo -u mempool bash -c 'export PATH=/opt/mempool-tools/cargo/bin:$PATH; cargo --version'; then
-  echo "Error: Rust installation failed."
-  exit 1
+if ! sudo -u mempool bash -c 'export HOME=/opt/mempool-tools PATH=/opt/mempool-tools/cargo/bin:$PATH; cargo --version'; then
+    echo "Error: Rust installation failed."
+    exit 1
 fi
-
 # Clone Mempool.space repository
 echo "Cloning Mempool.space repository..."
 # Clean up existing /opt/mempool if it exists
