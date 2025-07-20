@@ -1,6 +1,6 @@
 # Mempool.space Deployment Script
 
-This bash script deploys a Mempool.space instance on a Debian-based virtual machine (VM), offering a flexible setup for hosting a Bitcoin blockchain explorer. It is designed to accommodate users with existing infrastructure while providing options to install and configure all necessary components from scratch. The script supports deploying Mempool.space behind an Apache2 reverse proxy, using a MariaDB database, and connecting to a Bitcoin node (either existing or a newly installed Bitcoin Knots node).
+This bash script deploys a Mempool.space instance on a Debian-based server, offering a flexible setup for hosting a Bitcoin blockchain explorer. It is designed to accommodate users with existing infrastructure while providing options to install and configure all necessary components from scratch. The script supports deploying Mempool.space behind an Apache2 reverse proxy, using a MariaDB database, and connecting to a Bitcoin node (either existing or a newly installed Bitcoin Knots node).
 
 ## Features
 - Configurable Apache2 Setup: Uses an existing Apache2 server for reverse proxy by default, with an option to install and configure a new Apache2 server, including optional HTTPS certificates via Let's Encrypt.
