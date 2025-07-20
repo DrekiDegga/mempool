@@ -82,13 +82,7 @@ chown -R mempool:mempool /opt/mempool-tools
 # Install Rust for mempool user with explicit environment variables
 echo "Installing Rust..."
 sudo -u mempool env HOME=/opt/mempool-home RUSTUP_HOME=/opt/mempool-tools/rustup CARGO_HOME=/opt/mempool-tools/cargo \
-  bash -c 'curl --proto "=https" --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --no-modify-path'
-
-# Set Rust version to 1.84
-sudo -u mempool env HOME=/opt/mempool-home RUSTUP_HOME=/opt/mempool-tools/rustup CARGO_HOME=/opt/mempool-tools/cargo \
-  bash -c '/opt/mempool-tools/cargo/bin/rustup install 1.84'
-sudo -u mempool env HOME=/opt/mempool-home RUSTUP_HOME=/opt/mempool-tools/rustup CARGO_HOME=/opt/mempool-tools/cargo \
-  bash -c '/opt/mempool-tools/cargo/bin/rustup default 1.84'
+  bash -c 'curl --proto "=https" --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --no-modify-path --default-toolchain 1.84'
 
 # Verify Rust installation
 if ! sudo -u mempool env HOME=/opt/mempool-home PATH=/opt/mempool-tools/cargo/bin:$PATH cargo --version; then
