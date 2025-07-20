@@ -66,25 +66,42 @@ echo "Installing Node.js LTS from NodeSource..."
 curl -fsSL https://deb.nodesource.com/setup_lts.x | bash -
 apt-get install -y nodejs
 
-# Create a system user for Mempool
+# Create a system user for Mempool (if not already present)
 if ! id -u mempool > /dev/null 2>&1; then
   echo "Creating mempool user..."
   adduser --system --group --no-create-home mempool
 fi
 
-# Set up npm cache directory for mempool user
+# Set up npm cache directory for mempool user in a separate location
 echo "Setting up npm cache directory..."
-mkdir -p /opt/mempool/.npm-cache
-chown mempool:mempool /opt/mempool/.npm-cache
+mkdir -p /opt/mempool-cache/.npm-cache
+chown -R mempool:mempool /opt/mempool-cache
 
 # Clone Mempool.space repository
 echo "Cloning Mempool.space repository..."
+# Clean up existing /opt/mempool if it exists to ensure a fresh clone
+if [ -d /opt/mempool ]; then
+  echo "Removing existing /opt/mempool directory..."
+  rm -rf /opt/mempool
+fi
 mkdir -p /opt
-cd /opt
+cd /opt || { echo "Error: Failed to change to /opt directory."; exit 1; }
 git clone https://github.com/mempool/mempool.git
-cd mempool
+if [ $? -ne 0 ]; then
+  echo "Error: Failed to clone Mempool repository."
+  exit 1
+fi
+cd mempool || { echo "Error: Failed to change to /opt/mempool directory."; exit 1; }
 latestrelease=$(curl -s https://api.github.com/repos/mempool/mempool/releases/latest | grep tag_name | head -1 | cut -d '"' -f4)
+if [ -z "$latestrelease" ]; then
+  echo "Error: Failed to fetch latest Mempool release tag."
+  exit 1
+fi
 git checkout "$latestrelease"
+if [ $? -ne 0 ]; then
+  echo "Error: Failed to checkout release $latestrelease."
+  exit 1
+fi
 chown -R mempool:mempool /opt/mempool
 
 # Set up database if localhost
