@@ -49,7 +49,7 @@ tor_enabled=${tor_enabled:-no}
 # Install required packages
 echo "Installing necessary packages..."
 apt-get update
-apt-get install -y git curl apache2
+apt-get install -y git curl apache2 build-essential
 
 # Install MariaDB server if database is local
 if [ "$db_host" == "localhost" ]; then
@@ -61,7 +61,7 @@ if [ "$tor_enabled" == "yes" ]; then
   apt-get install -y tor
 fi
 
-# Install Node.js LTS from NodeSource (latest LTS version)
+# Install Node.js LTS from NodeSource
 echo "Installing Node.js LTS..."
 curl -fsSL https://deb.nodesource.com/setup_lts.x | bash -
 apt-get install -y nodejs
@@ -72,11 +72,11 @@ if ! id -u mempool > /dev/null 2>&1; then
   useradd -m -s /bin/false mempool
 fi
 
-# Install Rust for mempool user (latest stable version)
+# Install Rust for mempool user
 echo "Installing Rust for mempool user..."
 sudo -u mempool bash -c 'curl --proto "=https" --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y'
 
-# Set default Rust toolchain to stable (latest stable version)
+# Set default Rust toolchain to stable
 echo "Setting default Rust toolchain to stable..."
 sudo -u mempool bash -c 'source $HOME/.cargo/env && rustup default stable'
 
@@ -84,22 +84,20 @@ sudo -u mempool bash -c 'source $HOME/.cargo/env && rustup default stable'
 echo "Verifying Rust installation..."
 sudo -u mempool bash -c 'source $HOME/.cargo/env && cargo --version'
 
-# Create /opt/mempool directory with correct permissions *before* cloning
+# Create /opt/mempool directory with correct permissions
 echo "Creating /opt/mempool directory with correct permissions..."
-if [ ! -d "/opt/mempool" ]; then
-  mkdir -p /opt/mempool
-fi
+mkdir -p /opt/mempool
 chown mempool:mempool /opt/mempool
 chmod 755 /opt/mempool
 
-# Clone Mempool repository as mempool user (latest release)
+# Clone Mempool repository as mempool user
 echo "Cloning Mempool.space repository..."
 sudo -u mempool git clone https://github.com/mempool/mempool.git /opt/mempool
 
 # Checkout the latest release
 echo "Checking out the latest Mempool release..."
 cd /opt/mempool
-latest_release=$(curl -s https://api.github.com/repos/mempool/mempool/releases/latest | grep "tag_name" | cut -d '"' -f4)
+latest_release=$(curl -s https://api.github.com/repos/mempool/mempool/releases/langtest | grep "tag_name" | cut -d '"' -f4)
 sudo -u mempool git checkout "$latest_release"
 
 # Set up database if local
