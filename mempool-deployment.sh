@@ -46,7 +46,7 @@ electrum_tls=${electrum_tls:-true}
 read -p "Set up TOR hidden service? [no]: " tor_enabled
 tor_enabled=${tor_enabled:-no}
 
-# Install required packages
+# Install required packages, including rsync
 echo "Installing necessary packages..."
 apt-get update
 apt-get install -y git curl apache2 build-essential rsync
@@ -82,7 +82,10 @@ sudo -u mempool bash -c 'source $HOME/.cargo/env && rustup default stable'
 
 # Verify Rust installation
 echo "Verifying Rust installation..."
-sudo -u mempool bash -c 'source $HOME/.cargo/env && cargo --version'
+if ! sudo -u mempool bash -c 'source $HOME/.cargo/env && cargo --version'; then
+  echo "Error: Rust installation failed."
+  exit 1
+fi
 
 # Create /opt/mempool directory with correct permissions
 echo "Creating /opt/mempool directory with correct permissions..."
@@ -92,13 +95,23 @@ chmod 755 /opt/mempool
 
 # Clone Mempool repository as mempool user
 echo "Cloning Mempool.space repository..."
-sudo -u mempool git clone https://github.com/mempool/mempool.git /opt/mempool
+if ! sudo -u mempool git clone https://github.com/mempool/mempool.git /opt/mempool; then
+  echo "Error: Failed to clone Mempool repository."
+  exit 1
+fi
 
 # Checkout the latest release
 echo "Checking out the latest Mempool release..."
 cd /opt/mempool
-latest_release=$(curl -s https://api.github.com/repos/mempool/mempool/releases/langtest | grep "tag_name" | cut -d '"' -f4)
-sudo -u mempool git checkout "$latest_release"
+latest_release=$(curl -s https://api.github.com/repos/mempool/mempool/releases/latest | grep "tag_name" | cut -d '"' -f4)
+if [ -z "$latest_release" ]; then
+  echo "Error: Failed to fetch latest Mempool release tag."
+  exit 1
+fi
+if ! sudo -u mempool git checkout "$latest_release"; then
+  echo "Error: Failed to checkout release $latest_release."
+  exit 1
+fi
 
 # Set up database if local
 if [ "$db_host" == "localhost" ]; then
@@ -160,23 +173,63 @@ sudo -u mempool bash -c "cat << EOF > /opt/mempool/backend/mempool-config.json
 }
 EOF"
 
-# Clean up existing node_modules
-echo "Cleaning up existing node_modules..."
+# Configure Mempool frontend
+echo "Configuring Mempool frontend..."
+cd /opt/mempool/frontend
+sudo -u mempool bash -c 'cp mempool-frontend-config.sample.json mempool-frontend-config.json'
+
+# Clean up existing backend node_modules
+echo "Cleaning up existing backend node_modules..."
 rm -rf /opt/mempool/backend/node_modules /opt/mempool/backend/package-lock.json
 
 # Install and build backend with Rust environment
 echo "Installing backend dependencies..."
-sudo -u mempool bash -c 'source $HOME/.cargo/env && cd /opt/mempool/backend && npm install'
+if ! sudo -u mempool bash -c 'source $HOME/.cargo/env && cd /opt/mempool/backend && npm install'; then
+  echo "Error: npm install failed for backend. Check the output above for details."
+  echo "Try running manually:"
+  echo "  sudo -u mempool bash -c 'source \$HOME/.cargo/env && cd /opt/mempool/backend && npm install --loglevel=verbose'"
+  exit 1
+fi
+
+# Install latest socks-proxy-agent to resolve TypeScript type issues
+echo "Installing latest socks-proxy-agent..."
+sudo -u mempool bash -c 'cd /opt/mempool/backend && npm install socks-proxy-agent@latest'
 
 echo "Building backend..."
-sudo -u mempool bash -c 'source $HOME/.cargo/env && cd /opt/mempool/backend && npm run build'
+if ! sudo -u mempool bash -c 'source $HOME/.cargo/env && cd /opt/mempool/backend && npm run build'; then
+  echo "Error: Backend build failed. Check the output above for details."
+  echo "Try running manually:"
+  echo "  sudo -u mempool bash -c 'source \$HOME/.cargo/env && cd /opt/mempool/backend && npm run build --loglevel=verbose'"
+  exit 1
+fi
 
-# Build frontend
+# Clean up existing frontend node_modules
+echo "Cleaning up existing frontend node_modules..."
+rm -rf /opt/mempool/frontend/node_modules /opt/mempool/frontend/package-lock.json
+
+# Install and build frontend
+echo "Installing frontend dependencies..."
+if ! sudo -u mempool bash -c 'cd /opt/mempool/frontend && npm install'; then
+  echo "Error: npm install failed for frontend. Check the output above for details."
+  echo "Try running manually:"
+  echo "  sudo -u mempool bash -c 'cd /opt/mempool/frontend && npm install --loglevel=verbose'"
+  exit 1
+fi
+
+# Fix frontend vulnerabilities
+echo "Fixing frontend vulnerabilities..."
+sudo -u mempool bash -c 'cd /opt/mempool/frontend && npm audit fix'
+
 echo "Building frontend..."
-sudo -u mempool bash -c 'cd /opt/mempool/frontend && npm install'
-sudo -u mempool bash -c 'cd /opt/mempool/frontend && npm run build'
+if ! sudo -u mempool bash -c 'cd /opt/mempool/frontend && npm run build'; then
+  echo "Error: Frontend build failed. Check the output above for details."
+  echo "Try running manually:"
+  echo "  sudo -u mempool bash -c 'cd /opt/mempool/frontend && npm run build --loglevel=verbose'"
+  exit 1
+fi
 
 # Copy frontend to Apache directory
+echo "Copying frontend files to Apache directory..."
 mkdir -p /var/www/html/mempool
 cp -r /opt/mempool/frontend/dist/mempool/* /var/www/html/mempool/
 chown -R www-data:www-data /var/www/html/mempool
@@ -241,7 +294,7 @@ echo ""
 echo "Mempool.space Deployment Summary"
 echo "================================="
 echo "Installation Path: /opt/mempool"
-echo "Frontend Access: http://$internal_ip/mempool"
+echo "Frontend Access (Internal): http://$internal_ip/mempool"
 if [ "$tor_enabled" == "yes" ]; then
   echo "TOR Hidden Service: http://$onion_address"
 fi
@@ -255,19 +308,70 @@ fi
 echo "Bitcoin RPC: $bitcoin_rpc_host:$bitcoin_rpc_port, User: $bitcoin_rpc_user"
 echo "Electrum Server: $electrum_host:$electrum_port, TLS: $electrum_tls"
 echo ""
+echo "Services Installed:"
+echo "- mempool.service (Mempool backend)"
+echo "- apache2 (Serving frontend and proxying API)"
+if [ "$tor_enabled" == "yes" ]; then
+  echo "- tor (TOR hidden service)"
+fi
+if [ "$db_host" == "localhost" ]; then
+  echo "- mariadb (Local database)"
+fi
+echo ""
+echo "Public Access Configuration"
+echo "---------------------------"
+echo "To serve Mempool.space publicly via an existing Apache2 server, add this to its configuration:"
+echo ""
+echo "<VirtualHost *:443>"
+echo "    ServerName mempool.example.com"
+echo "    SSLEngine on"
+echo "    SSLCertificateFile /path/to/cert.pem"
+echo "    SSLCertificateKeyFile /path/to/key.pem"
+echo ""
+echo "    ProxyPass / http://$internal_ip:80/"
+echo "    ProxyPassReverse / http://$internal_ip:80/"
+echo "</VirtualHost>"
+echo "Adjust ServerName and SSL certificate paths as needed."
+echo ""
+echo "Recommendations"
+echo "--------------"
 echo "To update Mempool.space:"
 echo "  cd /opt/mempool"
 echo "  git pull"
 echo "  cd backend"
+echo "  rm -rf node_modules package-lock.json"
 echo "  sudo -u mempool bash -c 'source \$HOME/.cargo/env && npm install'"
+echo "  sudo -u mempool bash -c 'source \$HOME/.cargo/env && npm install socks-proxy-agent@latest'"
 echo "  sudo -u mempool bash -c 'source \$HOME/.cargo/env && npm run build'"
 echo "  cd ../frontend"
+echo "  rm -rf node_modules package-lock.json"
 echo "  sudo -u mempool bash -c 'npm install'"
+echo "  sudo -u mempool bash -c 'npm audit fix'"
 echo "  sudo -u mempool bash -c 'npm run build'"
 echo "  cp -r dist/mempool/* /var/www/html/mempool/"
 echo "  systemctl restart mempool"
 echo ""
-echo "Troubleshooting:"
+echo "Troubleshooting Tips"
+echo "--------------------"
+echo "If the backend fails to start or build fails:"
+echo "  - Check npm cache permissions:"
+echo "    ls -ld /home/mempool/.npm"
+echo "    chown mempool:mempool /home/mempool/.npm"
+echo "  - Check Rust installation:"
+echo "    sudo -u mempool bash -c 'source \$HOME/.cargo/env && cargo --version'"
+echo "  - Re-run backend installation and build:"
+echo "    cd /opt/mempool/backend"
+echo "    rm -rf node_modules package-lock.json"
+echo "    sudo -u mempool bash -c 'source \$HOME/.cargo/env && npm install --loglevel=verbose'"
+echo "    sudo -u mempool bash -c 'source \$HOME/.cargo/env && npm install socks-proxy-agent@latest'"
+echo "    sudo -u mempool bash -c 'source \$HOME/.cargo/env && npm run build --loglevel=verbose'"
+echo "  - Re-run frontend installation and build:"
+echo "    cd /opt/mempool/frontend"
+echo "    rm -rf node_modules package-lock.json"
+echo "    sudo -u mempool bash -c 'npm install --loglevel=verbose'"
+echo "    sudo -u mempool bash -c 'npm audit fix'"
+echo "    sudo -u mempool bash -c 'npm run build --loglevel=verbose'"
+echo "Check service statuses:"
 echo "  systemctl status mempool"
 echo "  systemctl status apache2"
 if [ "$tor_enabled" == "yes" ]; then
@@ -276,5 +380,59 @@ fi
 if [ "$db_host" == "localhost" ]; then
   echo "  systemctl status mariadb"
 fi
+echo "View logs:"
 echo "  journalctl -u mempool"
 echo "  journalctl -u apache2"
+if [ "$tor_enabled" == "yes" ]; then
+  echo "  journalctl -u tor"
+fi
+if [ "$db_host" == "localhost" ]; then
+  echo "  journalctl -u mariadb"
+fi
+echo "Ensure your Bitcoin node and Electrum server are running and accessible."
+if [ "$db_host" != "localhost" ]; then
+  echo "Verify that the MariaDB server at $db_host allows connections from this VM."
+fi
+echo "Check disk space and memory:"
+echo "  df -h"
+echo "  free -m"
+
+# Check service statuses and print recent logs
+echo ""
+echo "Service Status Checks"
+echo "====================="
+echo "Mempool Backend:"
+systemctl status mempool --no-pager
+echo ""
+echo "Apache2:"
+systemctl status apache2 --no-pager
+echo ""
+if [ "$tor_enabled" == "yes" ]; then
+  echo "TOR:"
+  systemctl status tor --no-pager
+  echo ""
+fi
+if [ "$db_host" == "localhost" ]; then
+  echo "MariaDB:"
+  systemctl status mariadb --no-pager
+  echo ""
+fi
+
+echo "Recent Logs"
+echo "==========="
+echo "Mempool Backend:"
+journalctl -u mempool --no-pager -n 20
+echo ""
+echo "Apache2:"
+journalctl -u apache2 --no-pager -n 20
+echo ""
+if [ "$tor_enabled" == "yes" ]; then
+  echo "TOR:"
+  journalctl -u tor --no-pager -n 20
+  echo ""
+fi
+if [ "$db_host" == "localhost" ]; then
+  echo "MariaDB:"
+  journalctl -u mariadb --no-pager -n 20
+  echo ""
+fi
