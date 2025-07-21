@@ -49,7 +49,7 @@ tor_enabled=${tor_enabled:-no}
 # Install required packages
 echo "Installing necessary packages..."
 apt-get update
-apt-get install -y git curl apache2 build-essential
+apt-get install -y git curl apache2 build-essential rsync
 
 # Install MariaDB server if database is local
 if [ "$db_host" == "localhost" ]; then
