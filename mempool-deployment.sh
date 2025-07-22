@@ -41,6 +41,12 @@ prompt_with_default() {
     eval $var_name="\${input:-\$default}"
 }
 
+# Function to escape special characters for JSON
+escape_json() {
+    local input="$1"
+    echo "$input" | sed -e 's/[\/&"\\%@^~!()]/\\&/g'
+}
+
 # Check if running as root or with sudo
 if [ "$EUID" -ne 0 ]; then
     print_error "This script must be run as root or with sudo."
@@ -53,7 +59,7 @@ apt-get update
 
 # Install prerequisites
 print_message "Installing prerequisites..."
-apt-get install -y apt-transport-https ca-certificates curl gnupg lsb-release netcat-openbsd mariadb-client
+apt-get install -y apt-transport-https ca-certificates curl gnupg lsb-release netcat-openbsd mariadb-client jq
 
 # Add Docker’s official GPG key
 print_message "Adding Docker GPG key..."
@@ -200,6 +206,10 @@ print_message "Creating docker-compose.yml..."
 mkdir -p /opt/mempool
 cd /opt/mempool
 
+# Escape passwords for JSON
+ESCAPED_BITCOIN_RPC_PASSWORD=$(escape_json "$BITCOIN_RPC_PASSWORD")
+ESCAPED_MARIADB_PASSWORD=$(escape_json "$MARIADB_PASSWORD")
+
 cat > docker-compose.yml <<EOF
 version: "3.7"
 services:
@@ -230,13 +240,13 @@ services:
       - CORE_RPC_HOST=$BITCOIN_RPC_HOST
       - CORE_RPC_PORT=$BITCOIN_RPC_PORT
       - CORE_RPC_USERNAME=$BITCOIN_RPC_USER
-      - CORE_RPC_PASSWORD="$(echo "$BITCOIN_RPC_PASSWORD" | sed -e 's/[\/&]/\\&/g')"
+      - CORE_RPC_PASSWORD=$ESCAPED_BITCOIN_RPC_PASSWORD
       - DATABASE_ENABLED=true
       - DATABASE_HOST=$MARIADB_HOST
       - DATABASE_PORT=$MARIADB_PORT
       - DATABASE_DATABASE=$MARIADB_DATABASE
       - DATABASE_USERNAME=$MARIADB_USER
-      - DATABASE_PASSWORD="$(echo "$MARIADB_PASSWORD" | sed -e 's/[\/&]/\\&/g')"
+      - DATABASE_PASSWORD=$ESCAPED_MARIADB_PASSWORD
       - MEMPOOL_HTTP_PORT=$MEMPOOL_HTTP_PORT
 EOF
 
@@ -252,12 +262,36 @@ if [ "$MARIADB_HOST" = "127.0.0.1" ] || [ "$MARIADB_HOST" = "localhost" ]; then
     environment:
       - MYSQL_DATABASE=$MARIADB_DATABASE
       - MYSQL_USER=$MARIADB_USER
-      - MYSQL_PASSWORD="$(echo "$MARIADB_PASSWORD" | sed -e 's/[\/&]/\\&/g')"
+      - MYSQL_PASSWORD=$ESCAPED_MARIADB_PASSWORD
       - MYSQL_ROOT_PASSWORD="$(openssl rand -base64 12)"
     volumes:
       - ./mysql/data:/var/lib/mysql
 EOF
 fi
+
+# Validate mempool-config.json (run a temporary container to generate and check config)
+print_message "Validating Mempool backend configuration..."
+docker run --rm -e MEMPOOL_BACKEND=electrum \
+    -e ELECTRUM_HOST=$ELECTRUM_HOST \
+    -e ELECTRUM_PORT=$ELECTRUM_PORT \
+    -e ELECTRUM_TLS_ENABLED=$ELECTRUM_TLS_ENABLED \
+    -e CORE_RPC_HOST=$BITCOIN_RPC_HOST \
+    -e CORE_RPC_PORT=$BITCOIN_RPC_PORT \
+    -e CORE_RPC_USERNAME=$BITCOIN_RPC_USER \
+    -e CORE_RPC_PASSWORD="$ESCAPED_BITCOIN_RPC_PASSWORD" \
+    -e DATABASE_ENABLED=true \
+    -e DATABASE_HOST=$MARIADB_HOST \
+    -e DATABASE_PORT=$MARIADB_PORT \
+    -e DATABASE_DATABASE=$MARIADB_DATABASE \
+    -e DATABASE_USERNAME=$MARIADB_USER \
+    -e DATABASE_PASSWORD="$ESCAPED_MARIADB_PASSWORD" \
+    -e MEMPOOL_HTTP_PORT=$MEMPOOL_HTTP_PORT \
+    mempool/backend:latest /bin/bash -c "node ./bin/www --dry-run > /tmp/mempool-config.json && jq . /tmp/mempool-config.json" >/dev/null 2>&1 || {
+    print_error "Invalid Mempool configuration. Likely due to special characters in passwords."
+    print_error "Check the generated config with:"
+    print_error "docker run --rm -e MEMPOOL_BACKEND=electrum -e ELECTRUM_HOST=$ELECTRUM_HOST -e ELECTRUM_PORT=$ELECTRUM_PORT -e ELECTRUM_TLS_ENABLED=$ELECTRUM_TLS_ENABLED -e CORE_RPC_HOST=$BITCOIN_RPC_HOST -e CORE_RPC_PORT=$BITCOIN_RPC_PORT -e CORE_RPC_USERNAME=$BITCOIN_RPC_USER -e CORE_RPC_PASSWORD='$ESCAPED_BITCOIN_RPC_PASSWORD' -e DATABASE_ENABLED=true -e DATABASE_HOST=$MARIADB_HOST -e DATABASE_PORT=$MARIADB_PORT -e DATABASE_DATABASE=$MARIADB_DATABASE -e DATABASE_USERNAME=$MARIADB_USER -e DATABASE_PASSWORD='$ESCAPED_MARIADB_PASSWORD' -e MEMPOOL_HTTP_PORT=$MEMPOOL_HTTP_PORT mempool/backend:latest /bin/bash -c 'node ./bin/www --dry-run > /tmp/mempool-config.json && cat /tmp/mempool-config.json'"
+    exit 1
+}
 
 # Start Mempool
 print_message "Starting Mempool with Docker Compose..."
