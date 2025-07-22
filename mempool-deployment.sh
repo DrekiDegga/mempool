@@ -53,7 +53,7 @@ apt-get update
 
 # Install prerequisites
 print_message "Installing prerequisites..."
-apt-get install -y apt-transport-https ca-certificates curl gnupg lsb-release netcat-openbsd
+apt-get install -y apt-transport-https ca-certificates curl gnupg lsb-release netcat-openbsd mariadb-client
 
 # Add Docker’s official GPG key
 print_message "Adding Docker GPG key..."
@@ -124,7 +124,7 @@ if [ "$MARIADB_HOST" != "127.0.0.1" ] && [ "$MARIADB_HOST" != "localhost" ]; the
     print_message "Testing MariaDB connection to $MARIADB_HOST:$MARIADB_PORT..."
     if ! mysql -h "$MARIADB_HOST" -P "$MARIADB_PORT" -u "$MARIADB_USER" -p"$MARIADB_PASSWORD" -e "SELECT 1" 2>/dev/null; then
         print_error "Failed to connect to MariaDB at $MARIADB_HOST:$MARIADB_PORT with user $MARIADB_USER."
-        print_error "Ensure the database is accessible and credentials are correct."
+        print_error "Ensure the database is accessible, credentials are correct, and mariadb-client is installed."
         exit 1
     fi
 fi
