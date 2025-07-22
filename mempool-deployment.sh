@@ -1,438 +1,322 @@
 #!/bin/bash
 
-# Check if the script is run as root
-if [ "$EUID" -ne 0 ]; then
-  echo "Please run this script as root (e.g., using sudo)"
-  exit 1
-fi
+# Script to install Docker and deploy Mempool on Debian, using existing Bitcoin Core, Electrum server, and MariaDB,
+# with Apache2 reverse proxy on another server and optional Tor hidden service using the official Tor repository.
 
-# Prompt user for deployment options with defaults
-echo "Please provide the following information. Press Enter to accept defaults."
+# Exit on any error
+set -e
 
-read -p "Database host [localhost]: " db_host
-db_host=${db_host:-localhost}
+# Colors for output
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+NC='\033[0m' # No Color
 
-if [ "$db_host" == "localhost" ]; then
-  db_port=3306
-  db_name="mempool"
-  db_user="mempool"
-  db_pass=$(openssl rand -base64 12)
-  echo "Generated database password: $db_pass"
-else
-  read -p "Database port [3306]: " db_port
-  db_port=${db_port:-3306}
-  read -p "Database name [mempool]: " db_name
-  db_name=${db_name:-mempool}
-  read -p "Database username: " db_user
-  read -s -p "Database password: " db_pass
-  echo
-fi
+# Default configuration values
+DEFAULT_MARIADB_PORT=3306
+DEFAULT_MEMPOOL_HTTP_PORT=8999
+DEFAULT_ELECTRUM_PORT=50002
+DEFAULT_BITCOIN_RPC_PORT=8332
+DEFAULT_TOR_CONTROL_PORT=9051
+DEFAULT_TOR_PORT=9050
+DEFAULT_MEMPOOL_FRONTEND_PORT=4080
+DEFAULT_MEMPOOL_DB_NAME="mempool"
+DEFAULT_MEMPOOL_DB_USER="mempool"
+DEFAULT_MEMPOOL_DB_PASSWORD="mempool"
 
-read -p "Bitcoin RPC host [127.0.0.1]: " bitcoin_rpc_host
-bitcoin_rpc_host=${bitcoin_rpc_host:-127.0.0.1}
-read -p "Bitcoin RPC port [8332]: " bitcoin_rpc_port
-bitcoin_rpc_port=${bitcoin_rpc_port:-8332}
-read -p "Bitcoin RPC username: " bitcoin_rpc_user
-read -s -p "Bitcoin RPC password: " bitcoin_rpc_pass
-echo
-
-read -p "Electrum host [127.0.0.1]: " electrum_host
-electrum_host=${electrum_host:-127.0.0.1}
-read -p "Electrum port [50002]: " electrum_port
-electrum_port=${electrum_port:-50002}
-read -p "Electrum TLS enabled [true]: " electrum_tls
-electrum_tls=${electrum_tls:-true}
-
-read -p "Set up TOR hidden service? [no]: " tor_enabled
-tor_enabled=${tor_enabled:-no}
-
-# Install required packages, including rsync
-echo "Installing necessary packages..."
-apt-get update
-apt-get install -y git curl apache2 build-essential rsync
-
-# Install MariaDB server if database is local
-if [ "$db_host" == "localhost" ]; then
-  apt-get install -y mariadb-server
-fi
-
-# Install TOR if enabled
-if [ "$tor_enabled" == "yes" ]; then
-  apt-get install -y tor
-fi
-
-# Install Node.js LTS from NodeSource
-echo "Installing Node.js LTS..."
-curl -fsSL https://deb.nodesource.com/setup_lts.x | bash -
-apt-get install -y nodejs
-
-# Create mempool user with home directory and no login shell
-if ! id -u mempool > /dev/null 2>&1; then
-  echo "Creating mempool user with home directory and no login shell..."
-  useradd -m -s /bin/false mempool
-fi
-
-# Install Rust for mempool user
-echo "Installing Rust for mempool user..."
-sudo -u mempool bash -c 'curl --proto "=https" --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y'
-
-# Set default Rust toolchain to stable
-echo "Setting default Rust toolchain to stable..."
-sudo -u mempool bash -c 'source $HOME/.cargo/env && rustup default stable'
-
-# Verify Rust installation
-echo "Verifying Rust installation..."
-if ! sudo -u mempool bash -c 'source $HOME/.cargo/env && cargo --version'; then
-  echo "Error: Rust installation failed."
-  exit 1
-fi
-
-# Create /opt/mempool directory with correct permissions
-echo "Creating /opt/mempool directory with correct permissions..."
-mkdir -p /opt/mempool
-chown mempool:mempool /opt/mempool
-chmod 755 /opt/mempool
-
-# Clone Mempool repository as mempool user
-echo "Cloning Mempool.space repository..."
-if ! sudo -u mempool git clone https://github.com/mempool/mempool.git /opt/mempool; then
-  echo "Error: Failed to clone Mempool repository."
-  exit 1
-fi
-
-# Checkout the latest release
-echo "Checking out the latest Mempool release..."
-cd /opt/mempool
-latest_release=$(curl -s https://api.github.com/repos/mempool/mempool/releases/latest | grep "tag_name" | cut -d '"' -f4)
-if [ -z "$latest_release" ]; then
-  echo "Error: Failed to fetch latest Mempool release tag."
-  exit 1
-fi
-if ! sudo -u mempool git checkout "$latest_release"; then
-  echo "Error: Failed to checkout release $latest_release."
-  exit 1
-fi
-
-# Set up database if local
-if [ "$db_host" == "localhost" ]; then
-  echo "Setting up local MariaDB database..."
-  systemctl start mariadb
-  systemctl enable mariadb
-  mysql -e "CREATE DATABASE $db_name;"
-  mysql -e "CREATE USER '$db_user'@'localhost' IDENTIFIED BY '$db_pass';"
-  mysql -e "GRANT ALL PRIVILEGES ON $db_name.* TO '$db_user'@'localhost';"
-  mysql -e "FLUSH PRIVILEGES;"
-fi
-
-# Configure Mempool backend
-echo "Configuring Mempool backend..."
-sudo -u mempool bash -c "cat << EOF > /opt/mempool/backend/mempool-config.json
-{
-  \"MEMPOOL\": {
-    \"NETWORK\": \"mainnet\",
-    \"BACKEND\": \"electrum\",
-    \"HTTP_PORT\": 8999,
-    \"SPAWN_CLUSTER_PROCS\": 0,
-    \"API_URL_PREFIX\": \"/api/v1/\",
-    \"POLL_RATE_MS\": 2000,
-    \"CACHE_DIR\": \"./cache\",
-    \"CLEAR_PROTECTION_MINUTES\": 20,
-    \"RECOMMENDED_FEE_PERCENTILE\": 50,
-    \"BLOCK_WEIGHT_UNITS\": 4000000,
-    \"INITIAL_BLOCKS_AMOUNT\": 8,
-    \"MEMPOOL_BLOCKS_AMOUNT\": 8,
-    \"PRICE_FEED_UPDATE_INTERVAL\": 3600,
-    \"USE_SECOND_NODE_FOR_MINFEE\": false,
-    \"EXTERNAL_ASSETS\": []
-  },
-  \"CORE_RPC\": {
-    \"HOST\": \"$bitcoin_rpc_host\",
-    \"PORT\": $bitcoin_rpc_port,
-    \"USERNAME\": \"$bitcoin_rpc_user\",
-    \"PASSWORD\": \"$bitcoin_rpc_pass\"
-  },
-  \"ELECTRUM\": {
-    \"HOST\": \"$electrum_host\",
-    \"PORT\": $electrum_port,
-    \"TLS_ENABLED\": $electrum_tls
-  },
-  \"DATABASE\": {
-    \"ENABLED\": true,
-    \"HOST\": \"$db_host\",
-    \"PORT\": $db_port,
-    \"USERNAME\": \"$db_user\",
-    \"PASSWORD\": \"$db_pass\",
-    \"DATABASE\": \"$db_name\"
-  },
-  \"SOCKS5PROXY\": {
-    \"ENABLED\": false
-  },
-  \"PRICE_DATA_SERVER\": {
-    \"TOR_URL\": \"http://wizpriceje6q5tdrxkyiazsgu7irquiqjy2dptezqhrtu7l2qelqktid.onion/getAllMarketPrices\"
-  }
+# Function to print messages
+print_message() {
+    echo -e "${GREEN}[INFO]${NC} $1"
 }
-EOF"
 
-# Configure Mempool frontend
-echo "Configuring Mempool frontend..."
-cd /opt/mempool/frontend
-sudo -u mempool bash -c 'cp mempool-frontend-config.sample.json mempool-frontend-config.json'
+print_error() {
+    echo -e "${RED}[ERROR]${NC} $1"
+}
 
-# Clean up existing backend node_modules
-echo "Cleaning up existing backend node_modules..."
-rm -rf /opt/mempool/backend/node_modules /opt/mempool/backend/package-lock.json
+# Function to prompt for input with a default value, handling special characters
+prompt_with_default() {
+    local prompt="$1"
+    local default="$2"
+    local var_name="$3"
+    read -r -p "$prompt [$default]: " input
+    eval $var_name="\${input:-\$default}"
+}
 
-# Install and build backend with Rust environment
-echo "Installing backend dependencies..."
-if ! sudo -u mempool bash -c 'source $HOME/.cargo/env && cd /opt/mempool/backend && npm install'; then
-  echo "Error: npm install failed for backend. Check the output above for details."
-  echo "Try running manually:"
-  echo "  sudo -u mempool bash -c 'source \$HOME/.cargo/env && cd /opt/mempool/backend && npm install --loglevel=verbose'"
-  exit 1
+# Check if running as root or with sudo
+if [ "$EUID" -ne 0 ]; then
+    print_error "This script must be run as root or with sudo."
+    exit 1
 fi
 
-# Install latest socks-proxy-agent to resolve TypeScript type issues
-echo "Installing latest socks-proxy-agent..."
-sudo -u mempool bash -c 'cd /opt/mempool/backend && npm install socks-proxy-agent@latest'
+# Update package lists
+print_message "Updating package lists..."
+apt-get update
 
-echo "Building backend..."
-if ! sudo -u mempool bash -c 'source $HOME/.cargo/env && cd /opt/mempool/backend && npm run build'; then
-  echo "Error: Backend build failed. Check the output above for details."
-  echo "Try running manually:"
-  echo "  sudo -u mempool bash -c 'source \$HOME/.cargo/env && cd /opt/mempool/backend && npm run build --loglevel=verbose'"
-  exit 1
+# Install prerequisites
+print_message "Installing prerequisites..."
+apt-get install -y apt-transport-https ca-certificates curl gnupg lsb-release netcat-openbsd
+
+# Add Docker’s official GPG key
+print_message "Adding Docker GPG key..."
+curl -fsSL https://download.docker.com/linux/debian/gpg | gpg --dearmor -o /usr/share/keyrings/docker-archive-keyring.gpg
+
+# Set up Docker repository
+print_message "Setting up Docker repository..."
+echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/docker-archive-keyring.gpg] https://download.docker.com/linux/debian $(lsb_release -cs) stable" | tee /etc/apt/sources.list.d/docker.list > /dev/null
+
+# Update package lists again
+apt-get update
+
+# Install Docker Engine and Docker Compose
+print_message "Installing Docker and Docker Compose..."
+apt-get install -y docker-ce docker-ce-cli containerd.io docker-compose-plugin
+
+# Start and enable Docker service
+print_message "Starting and enabling Docker service..."
+systemctl start docker
+systemctl enable docker
+
+# Verify Docker installation
+print_message "Verifying Docker installation..."
+docker --version
+docker compose version
+
+# Prompt for configuration details
+print_message "Collecting configuration details..."
+
+# Bitcoin Core
+prompt_with_default "Enter Bitcoin Core RPC host (e.g., 192.168.1.100)" "127.0.0.1" BITCOIN_RPC_HOST
+prompt_with_default "Enter Bitcoin Core RPC port" "$DEFAULT_BITCOIN_RPC_PORT" BITCOIN_RPC_PORT
+prompt_with_default "Enter Bitcoin Core RPC username" "mempool" BITCOIN_RPC_USER
+prompt_with_default "Enter Bitcoin Core RPC password" "mempool" BITCOIN_RPC_PASSWORD
+
+# Electrum Server
+prompt_with_default "Enter Electrum server host (e.g., electrum.degga.net)" "127.0.0.1" ELECTRUM_HOST
+prompt_with_default "Enter Electrum server port" "$DEFAULT_ELECTRUM_PORT" ELECTRUM_PORT
+prompt_with_default "Is Electrum server using TLS? (true/false)" "false" ELECTRUM_TLS_ENABLED
+
+# MariaDB
+prompt_with_default "Enter MariaDB host (e.g., 192.168.1.100)" "127.0.0.1" MARIADB_HOST
+prompt_with_default "Enter MariaDB port" "$DEFAULT_MARIADB_PORT" MARIADB_PORT
+prompt_with_default "Enter MariaDB database name" "$DEFAULT_MEMPOOL_DB_NAME" MARIADB_DATABASE
+prompt_with_default "Enter MariaDB username" "$DEFAULT_MEMPOOL_DB_USER" MARIADB_USER
+prompt_with_default "Enter MariaDB password" "$DEFAULT_MEMPOOL_DB_PASSWORD" MARIADB_PASSWORD
+
+# Mempool ports
+prompt_with_default "Enter Mempool backend HTTP port" "$DEFAULT_MEMPOOL_HTTP_PORT" MEMPOOL_HTTP_PORT
+prompt_with_default "Enter Mempool frontend HTTP port" "$DEFAULT_MEMPOOL_FRONTEND_PORT" MEMPOOL_FRONTEND_PORT
+
+# Apache2 reverse proxy details
+prompt_with_default "Enter Apache2 server public domain or IP (e.g., mempool.example.com)" "mempool.local" APACHE_DOMAIN
+prompt_with_default "Enter Mempool VM internal IP accessible by Apache2 server" "192.168.1.100" MEMPOOL_VM_IP
+
+# Tor hidden service
+prompt_with_default "Do you want to set up a Tor hidden service for Mempool? (yes/no)" "no" SETUP_TOR
+if [ "$SETUP_TOR" = "yes" ]; then
+    prompt_with_default "Enter Tor control port" "$DEFAULT_TOR_CONTROL_PORT" TOR_CONTROL_PORT
+    prompt_with_default "Enter Tor proxy port" "$DEFAULT_TOR_PORT" TOR_PORT
 fi
 
-# Clean up existing frontend node_modules
-echo "Cleaning up existing frontend node_modules..."
-rm -rf /opt/mempool/frontend/node_modules /opt/mempool/frontend/package-lock.json
+# Verify connectivity to dependencies
+print_message "Verifying connectivity to dependencies..."
 
-# Install and build frontend
-echo "Installing frontend dependencies..."
-if ! sudo -u mempool bash -c 'cd /opt/mempool/frontend && npm install'; then
-  echo "Error: npm install failed for frontend. Check the output above for details."
-  echo "Try running manually:"
-  echo "  sudo -u mempool bash -c 'cd /opt/mempool/frontend && npm install --loglevel=verbose'"
-  exit 1
+# MariaDB
+if [ "$MARIADB_HOST" != "127.0.0.1" ] && [ "$MARIADB_HOST" != "localhost" ]; then
+    print_message "Testing MariaDB connection to $MARIADB_HOST:$MARIADB_PORT..."
+    if ! mysql -h "$MARIADB_HOST" -P "$MARIADB_PORT" -u "$MARIADB_USER" -p"$MARIADB_PASSWORD" -e "SELECT 1" 2>/dev/null; then
+        print_error "Failed to connect to MariaDB at $MARIADB_HOST:$MARIADB_PORT with user $MARIADB_USER."
+        print_error "Ensure the database is accessible and credentials are correct."
+        exit 1
+    fi
 fi
 
-# Fix frontend vulnerabilities
-echo "Fixing frontend vulnerabilities..."
-sudo -u mempool bash -c 'cd /opt/mempool/frontend && npm audit fix'
-
-echo "Building frontend..."
-if ! sudo -u mempool bash -c 'cd /opt/mempool/frontend && npm run build'; then
-  echo "Error: Frontend build failed. Check the output above for details."
-  echo "Try running manually:"
-  echo "  sudo -u mempool bash -c 'cd /opt/mempool/frontend && npm run build --loglevel=verbose'"
-  exit 1
+# Bitcoin Core
+print_message "Testing Bitcoin Core RPC connection to $BITCOIN_RPC_HOST:$BITCOIN_RPC_PORT..."
+if ! curl --user "$BITCOIN_RPC_USER:$BITCOIN_RPC_PASSWORD" --data-binary '{"jsonrpc":"1.0","id":"curltest","method":"getblockchaininfo","params":[]}' -H 'content-type:text/plain;' "http://$BITCOIN_RPC_HOST:$BITCOIN_RPC_PORT/" 2>/dev/null | grep -q '"result"'; then
+    print_error "Failed to connect to Bitcoin Core at $BITCOIN_RPC_HOST:$BITCOIN_RPC_PORT."
+    print_error "Check rpcuser, rpcpassword, and rpcallowip in bitcoin.conf."
+    exit 1
 fi
 
-# Copy frontend to Apache directory
-echo "Copying frontend files to Apache directory..."
-mkdir -p /var/www/html/mempool
-cp -r /opt/mempool/frontend/dist/mempool/* /var/www/html/mempool/
-chown -R www-data:www-data /var/www/html/mempool
+# Electrum
+print_message "Testing Electrum connection to $ELECTRUM_HOST:$ELECTRUM_PORT..."
+if ! nc -zv "$ELECTRUM_HOST" "$ELECTRUM_PORT" 2>/dev/null; then
+    print_error "Failed to connect to Electrum at $ELECTRUM_HOST:$ELECTRUM_PORT."
+    print_error "Ensure the Electrum server is running and accessible."
+    exit 1
+fi
 
-# Configure Apache
-echo "Configuring Apache..."
-a2enmod proxy proxy_http
-cat << EOF > /etc/apache2/sites-available/mempool.conf
+# Set up Tor hidden service if requested
+if [ "$SETUP_TOR" = "yes" ]; then
+    print_message "Setting up Tor Project repository and installing latest Tor..."
+    apt-get install -y apt-transport-https
+    curl -fsSL https://deb.torproject.org/torproject.org/A3C4F0F979CAA22CDBA8F512EE8CBC9E886DDD89.asc | gpg --dearmor -o /usr/share/keyrings/tor-archive-keyring.gpg
+    echo "deb [signed-by=/usr/share/keyrings/tor-archive-keyring.gpg] https://deb.torproject.org/torproject.org $(lsb_release -cs) main" | tee /etc/apt/sources.list.d/tor.list
+    apt-get update
+    apt-get install -y tor tor-geoipdb
+    print_message "Configuring Tor hidden service directory..."
+    mkdir -p /var/lib/tor/mempool_service
+    chown debian-tor:debian-tor /var/lib/tor/mempool_service
+    chmod 700 /var/lib/tor/mempool_service
+    print_message "Creating /etc/tor/torrc..."
+    cat > /etc/tor/torrc <<EOF
+SocksPort $TOR_PORT
+ControlPort $TOR_CONTROL_PORT
+HiddenServiceDir /var/lib/tor/mempool_service/
+HiddenServiceVersion 3
+HiddenServicePort 80 127.0.0.1:$MEMPOOL_FRONTEND_PORT
+EOF
+    print_message "Validating Tor configuration..."
+    if ! sudo -u debian-tor tor --verify-config -f /etc/tor/torrc; then
+        print_error "Invalid Tor configuration in /etc/tor/torrc. Please check the file and fix syntax errors."
+        print_error "View logs with: journalctl -u tor"
+        print_error "Current torrc contents:"
+        cat /etc/tor/torrc
+        exit 1
+    fi
+    print_message "Restarting Tor service..."
+    systemctl restart tor
+    sleep 5
+    if systemctl is-active --quiet tor; then
+        print_message "Tor service is running."
+        if [ -f /var/lib/tor/mempool_service/hostname ]; then
+            print_message "Tor hidden service hostname:"
+            cat /var/lib/tor/mempool_service/hostname
+        else
+            print_error "Tor hidden service hostname not found. Check Tor logs with: journalctl -u tor"
+            print_error "Current torrc contents:"
+            cat /etc/tor/torrc
+            exit 1
+        fi
+    else
+        print_error "Tor service failed to start. Check logs with: journalctl -u tor"
+        print_error "Current torrc contents:"
+        cat /etc/tor/torrc
+        exit 1
+    fi
+fi
+
+# Create docker-compose.yml for Mempool
+print_message "Creating docker-compose.yml..."
+mkdir -p /opt/mempool
+cd /opt/mempool
+
+cat > docker-compose.yml <<EOF
+version: "3.7"
+services:
+  web:
+    image: mempool/frontend:latest
+    user: "1000:1000"
+    restart: always
+    stop_grace_period: 1m
+    command: "nginx -g 'daemon off;'"
+    ports:
+      - "$MEMPOOL_FRONTEND_PORT:8080"
+    environment:
+      - FRONTEND_HTTP_PORT=8080
+      - BACKEND_MAINNET_HTTP_HOST=api
+  api:
+    image: mempool/backend:latest
+    user: "1000:1000"
+    restart: always
+    stop_grace_period: 1m
+    command: "./start.sh"
+    volumes:
+      - ./data:/backend/cache
+    environment:
+      - MEMPOOL_BACKEND=electrum
+      - ELECTRUM_HOST=$ELECTRUM_HOST
+      - ELECTRUM_PORT=$ELECTRUM_PORT
+      - ELECTRUM_TLS_ENABLED=$ELECTRUM_TLS_ENABLED
+      - CORE_RPC_HOST=$BITCOIN_RPC_HOST
+      - CORE_RPC_PORT=$BITCOIN_RPC_PORT
+      - CORE_RPC_USERNAME=$BITCOIN_RPC_USER
+      - CORE_RPC_PASSWORD="$(echo "$BITCOIN_RPC_PASSWORD" | sed -e 's/[\/&]/\\&/g')"
+      - DATABASE_ENABLED=true
+      - DATABASE_HOST=$MARIADB_HOST
+      - DATABASE_PORT=$MARIADB_PORT
+      - DATABASE_DATABASE=$MARIADB_DATABASE
+      - DATABASE_USERNAME=$MARIADB_USER
+      - DATABASE_PASSWORD="$(echo "$MARIADB_PASSWORD" | sed -e 's/[\/&]/\\&/g')"
+      - MEMPOOL_HTTP_PORT=$MEMPOOL_HTTP_PORT
+EOF
+
+# If MariaDB is local, include the db service
+if [ "$MARIADB_HOST" = "127.0.0.1" ] || [ "$MARIADB_HOST" = "localhost" ]; then
+    print_message "Configuring local MariaDB in Docker..."
+    cat >> docker-compose.yml <<EOF
+  db:
+    image: mariadb:10.5.8
+    user: "1000:1000"
+    restart: always
+    stop_grace_period: 1m
+    environment:
+      - MYSQL_DATABASE=$MARIADB_DATABASE
+      - MYSQL_USER=$MARIADB_USER
+      - MYSQL_PASSWORD="$(echo "$MARIADB_PASSWORD" | sed -e 's/[\/&]/\\&/g')"
+      - MYSQL_ROOT_PASSWORD="$(openssl rand -base64 12)"
+    volumes:
+      - ./mysql/data:/var/lib/mysql
+EOF
+fi
+
+# Start Mempool
+print_message "Starting Mempool with Docker Compose..."
+docker compose up -d
+
+# Generate Apache2 reverse proxy configuration
+print_message "Generating Apache2 reverse proxy configuration for $APACHE_DOMAIN..."
+cat > /opt/mempool/apache2-mempool.conf <<EOF
+<VirtualHost *:443>
+    ServerName $APACHE_DOMAIN
+    SSLEngine on
+    SSLCertificateFile /path/to/your/certificate.crt
+    SSLCertificateKeyFile /path/to/your/private.key
+    SSLCertificateChainFile /path/to/your/chain.pem
+
+    ProxyPreserveHost On
+    ProxyPass / http://$MEMPOOL_VM_IP:$MEMPOOL_FRONTEND_PORT/
+    ProxyPassReverse / http://$MEMPOOL_VM_IP:$MEMPOOL_FRONTEND_PORT/
+
+    <Location />
+        Order allow,deny
+        Allow from all
+    </Location>
+
+    ErrorLog \${APACHE_LOG_DIR}/mempool-error.log
+    CustomLog \${APACHE_LOG_DIR}/mempool-access.log combined
+</VirtualHost>
+
 <VirtualHost *:80>
-    ServerName mempool.local
-    DocumentRoot /var/www/html/mempool
-
-    <Directory /var/www/html/mempool>
-        Options Indexes FollowSymLinks
-        AllowOverride All
-        Require all granted
-    </Directory>
-
-    ProxyPass /api http://localhost:8999/api
-    ProxyPassReverse /api http://localhost:8999/api
+    ServerName $APACHE_DOMAIN
+    Redirect permanent / https://$APACHE_DOMAIN/
 </VirtualHost>
 EOF
-a2ensite mempool
-systemctl reload apache2
 
-# Create systemd service for Mempool backend
-echo "Creating systemd service..."
-cat << EOF > /etc/systemd/system/mempool.service
-[Unit]
-Description=Mempool.space Backend
-After=network.target
+print_message "Apache2 configuration generated at /opt/mempool/apache2-mempool.conf"
+print_message "Copy this file to your Apache2 server (e.g., /etc/apache2/sites-available/mempool.conf)"
+print_message "Update SSLCertificateFile, SSLCertificateKeyFile, and SSLCertificateChainFile paths"
+print_message "Enable the site with: sudo a2ensite mempool && sudo systemctl reload apache2"
 
-[Service]
-WorkingDirectory=/opt/mempool/backend
-ExecStart=/usr/bin/node --max-old-space-size=2048 dist/index.js
-User=mempool
-Restart=on-failure
-RestartSec=600
-
-[Install]
-WantedBy=multi-user.target
-EOF
-systemctl daemon-reload
-systemctl enable mempool
-systemctl start mempool
-
-# Set up TOR hidden service if enabled
-if [ "$tor_enabled" == "yes" ]; then
-  echo "Configuring TOR hidden service..."
-  echo "HiddenServiceDir /var/lib/tor/mempool/" >> /etc/tor/torrc
-  echo "HiddenServicePort 80 127.0.0.1:80" >> /etc/tor/torrc
-  systemctl restart tor
-  sleep 5
-  onion_address=$(cat /var/lib/tor/mempool/hostname)
-fi
-
-# Get internal IP for summary
-internal_ip=$(hostname -I | awk '{print $1}')
-
-# Summary
-echo ""
-echo "Mempool.space Deployment Summary"
-echo "================================="
-echo "Installation Path: /opt/mempool"
-echo "Frontend Access (Internal): http://$internal_ip/mempool"
-if [ "$tor_enabled" == "yes" ]; then
-  echo "TOR Hidden Service: http://$onion_address"
-fi
-echo "Backend Service: mempool.service"
-echo "Database: $db_host:$db_port, Database Name: $db_name, User: $db_user"
-if [ "$db_host" == "localhost" ]; then
-  echo "Database Password: $db_pass (generated)"
+# Verify Mempool is running
+print_message "Verifying Mempool is running..."
+sleep 10
+if docker ps | grep -q mempool; then
+    print_message "Mempool containers are running."
+    print_message "Testing web interface at http://127.0.0.1:$MEMPOOL_FRONTEND_PORT..."
+    if curl -s --fail http://127.0.0.1:$MEMPOOL_FRONTEND_PORT >/dev/null; then
+        print_message "Mempool web interface is accessible locally at http://$MEMPOOL_VM_IP:$MEMPOOL_FRONTEND_PORT"
+        if [ "$SETUP_TOR" = "yes" ]; then
+            print_message "Tor hidden service is set up. Access it via the .onion address shown above."
+        fi
+        print_message "Configure your Apache2 server to proxy HTTPS requests to http://$MEMPOOL_VM_IP:$MEMPOOL_FRONTEND_PORT"
+    else
+        print_error "Mempool web interface is not accessible at http://127.0.0.1:$MEMPOOL_FRONTEND_PORT"
+        print_error "Check container logs with: docker compose logs"
+        exit 1
+    fi
 else
-  echo "Database Password: (as provided)"
-fi
-echo "Bitcoin RPC: $bitcoin_rpc_host:$bitcoin_rpc_port, User: $bitcoin_rpc_user"
-echo "Electrum Server: $electrum_host:$electrum_port, TLS: $electrum_tls"
-echo ""
-echo "Services Installed:"
-echo "- mempool.service (Mempool backend)"
-echo "- apache2 (Serving frontend and proxying API)"
-if [ "$tor_enabled" == "yes" ]; then
-  echo "- tor (TOR hidden service)"
-fi
-if [ "$db_host" == "localhost" ]; then
-  echo "- mariadb (Local database)"
-fi
-echo ""
-echo "Public Access Configuration"
-echo "---------------------------"
-echo "To serve Mempool.space publicly via an existing Apache2 server, add this to its configuration:"
-echo ""
-echo "<VirtualHost *:443>"
-echo "    ServerName mempool.example.com"
-echo "    SSLEngine on"
-echo "    SSLCertificateFile /path/to/cert.pem"
-echo "    SSLCertificateKeyFile /path/to/key.pem"
-echo ""
-echo "    ProxyPass / http://$internal_ip:80/"
-echo "    ProxyPassReverse / http://$internal_ip:80/"
-echo "</VirtualHost>"
-echo "Adjust ServerName and SSL certificate paths as needed."
-echo ""
-echo "Recommendations"
-echo "--------------"
-echo "To update Mempool.space:"
-echo "  cd /opt/mempool"
-echo "  git pull"
-echo "  cd backend"
-echo "  rm -rf node_modules package-lock.json"
-echo "  sudo -u mempool bash -c 'source \$HOME/.cargo/env && npm install'"
-echo "  sudo -u mempool bash -c 'source \$HOME/.cargo/env && npm install socks-proxy-agent@latest'"
-echo "  sudo -u mempool bash -c 'source \$HOME/.cargo/env && npm run build'"
-echo "  cd ../frontend"
-echo "  rm -rf node_modules package-lock.json"
-echo "  sudo -u mempool bash -c 'npm install'"
-echo "  sudo -u mempool bash -c 'npm audit fix'"
-echo "  sudo -u mempool bash -c 'npm run build'"
-echo "  cp -r dist/mempool/* /var/www/html/mempool/"
-echo "  systemctl restart mempool"
-echo ""
-echo "Troubleshooting Tips"
-echo "--------------------"
-echo "If the backend fails to start or build fails:"
-echo "  - Check npm cache permissions:"
-echo "    ls -ld /home/mempool/.npm"
-echo "    chown mempool:mempool /home/mempool/.npm"
-echo "  - Check Rust installation:"
-echo "    sudo -u mempool bash -c 'source \$HOME/.cargo/env && cargo --version'"
-echo "  - Re-run backend installation and build:"
-echo "    cd /opt/mempool/backend"
-echo "    rm -rf node_modules package-lock.json"
-echo "    sudo -u mempool bash -c 'source \$HOME/.cargo/env && npm install --loglevel=verbose'"
-echo "    sudo -u mempool bash -c 'source \$HOME/.cargo/env && npm install socks-proxy-agent@latest'"
-echo "    sudo -u mempool bash -c 'source \$HOME/.cargo/env && npm run build --loglevel=verbose'"
-echo "  - Re-run frontend installation and build:"
-echo "    cd /opt/mempool/frontend"
-echo "    rm -rf node_modules package-lock.json"
-echo "    sudo -u mempool bash -c 'npm install --loglevel=verbose'"
-echo "    sudo -u mempool bash -c 'npm audit fix'"
-echo "    sudo -u mempool bash -c 'npm run build --loglevel=verbose'"
-echo "Check service statuses:"
-echo "  systemctl status mempool"
-echo "  systemctl status apache2"
-if [ "$tor_enabled" == "yes" ]; then
-  echo "  systemctl status tor"
-fi
-if [ "$db_host" == "localhost" ]; then
-  echo "  systemctl status mariadb"
-fi
-echo "View logs:"
-echo "  journalctl -u mempool"
-echo "  journalctl -u apache2"
-if [ "$tor_enabled" == "yes" ]; then
-  echo "  journalctl -u tor"
-fi
-if [ "$db_host" == "localhost" ]; then
-  echo "  journalctl -u mariadb"
-fi
-echo "Ensure your Bitcoin node and Electrum server are running and accessible."
-if [ "$db_host" != "localhost" ]; then
-  echo "Verify that the MariaDB server at $db_host allows connections from this VM."
-fi
-echo "Check disk space and memory:"
-echo "  df -h"
-echo "  free -m"
-
-# Check service statuses and print recent logs
-echo ""
-echo "Service Status Checks"
-echo "====================="
-echo "Mempool Backend:"
-systemctl status mempool --no-pager
-echo ""
-echo "Apache2:"
-systemctl status apache2 --no-pager
-echo ""
-if [ "$tor_enabled" == "yes" ]; then
-  echo "TOR:"
-  systemctl status tor --no-pager
-  echo ""
-fi
-if [ "$db_host" == "localhost" ]; then
-  echo "MariaDB:"
-  systemctl status mariadb --no-pager
-  echo ""
+    print_error "Mempool containers failed to start. Check logs with: docker compose logs"
+    exit 1
 fi
 
-echo "Recent Logs"
-echo "==========="
-echo "Mempool Backend:"
-journalctl -u mempool --no-pager -n 20
-echo ""
-echo "Apache2:"
-journalctl -u apache2 --no-pager -n 20
-echo ""
-if [ "$tor_enabled" == "yes" ]; then
-  echo "TOR:"
-  journalctl -u tor --no-pager -n 20
-  echo ""
-fi
-if [ "$db_host" == "localhost" ]; then
-  echo "MariaDB:"
-  journalctl -u mariadb --no-pager -n 20
-  echo ""
-fi
+print_message "Deployment complete!"
