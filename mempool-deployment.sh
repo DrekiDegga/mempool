@@ -161,6 +161,8 @@ if [ "$SETUP_TOR" = "yes" ]; then
     cat > /etc/tor/torrc <<EOF
 SocksPort $TOR_PORT
 ControlPort $TOR_CONTROL_PORT
+CookieAuthentication 1
+CookieAuthFile /var/lib/tor/control_auth_cookie
 HiddenServiceDir /var/lib/tor/mempool_service/
 HiddenServiceVersion 3
 HiddenServicePort 80 127.0.0.1:$MEMPOOL_FRONTEND_PORT
@@ -230,13 +232,13 @@ services:
       - CORE_RPC_HOST=$BITCOIN_RPC_HOST
       - CORE_RPC_PORT=$BITCOIN_RPC_PORT
       - CORE_RPC_USERNAME=$BITCOIN_RPC_USER
-      - CORE_RPC_PASSWORD="$(echo "$BITCOIN_RPC_PASSWORD" | sed -e 's/[\/&]/\\&/g')"
+      - CORE_RPC_PASSWORD=$(echo $BITCOIN_RPC_PASSWORD | sed -e 's/[\/&]/\\&/g')
       - DATABASE_ENABLED=true
       - DATABASE_HOST=$MARIADB_HOST
       - DATABASE_PORT=$MARIADB_PORT
       - DATABASE_DATABASE=$MARIADB_DATABASE
       - DATABASE_USERNAME=$MARIADB_USER
-      - DATABASE_PASSWORD="$(echo "$MARIADB_PASSWORD" | sed -e 's/[\/&]/\\&/g')"
+      - DATABASE_PASSWORD=$(echo $MARIADB_PASSWORD | sed -e 's/[\/&]/\\&/g')
       - MEMPOOL_HTTP_PORT=$MEMPOOL_HTTP_PORT
 EOF
 
